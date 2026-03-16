@@ -1,0 +1,958 @@
+import * as LiteGraphModule from 'https://cdn.jsdelivr.net/npm/@comfyorg/litegraph@0.17.2/dist/litegraph.es.js';
+
+const { LiteGraph, LGraph, LGraphCanvas, LGraphNode } = LiteGraphModule;
+
+let graph = null;
+let canvas = null;
+let bentoSchema = null;
+const nodeTypes = { input: {}, processor: {}, output: {} };
+const nodeDescriptions = { input: {}, processor: {}, output: {} };
+
+const COLORS = {
+    input: '#238636',
+    processor: '#6e40c9',
+    output: '#1f6feb',
+    resource: '#9e6a03'
+};
+
+class BentoInputNode extends LGraphNode {
+    constructor(nodeName) {
+        super(nodeName);
+        this.addOutput('out', 'message');
+        this.bentoType = 'input';
+        this.bentoName = nodeName;
+        this.color = COLORS.input;
+        this.boxcolor = COLORS.input;
+    }
+    
+    onExecute() {}
+}
+
+class BentoProcessorNode extends LGraphNode {
+    constructor(nodeName) {
+        super(nodeName);
+        this.addInput('in', 'message');
+        this.addOutput('out', 'message');
+        this.bentoType = 'processor';
+        this.bentoName = nodeName;
+        this.color = COLORS.processor;
+        this.boxcolor = COLORS.processor;
+    }
+    
+    onExecute() {}
+}
+
+class BentoOutputNode extends LGraphNode {
+    constructor(nodeName) {
+        super(nodeName);
+        this.addInput('in', 'message');
+        this.bentoType = 'output';
+        this.bentoName = nodeName;
+        this.color = COLORS.output;
+        this.boxcolor = COLORS.output;
+    }
+    
+    onExecute() {}
+}
+
+function extractProperties(schemaObj) {
+    if (!schemaObj || !schemaObj.properties) return [];
+    
+    const props = [];
+    for (const [name, def] of Object.entries(schemaObj.properties)) {
+        props.push({
+            name,
+            type: def.type || 'string',
+            description: def.description || '',
+            default: def.default,
+            examples: def.examples,
+            enum: def.enum
+        });
+    }
+    return props;
+}
+
+function createWidgetForProperty(node, prop) {
+    const name = prop.name;
+    const tooltip = prop.description ? prop.description.substring(0, 200) + (prop.description.length > 200 ? '...' : '') : '';
+    
+    if (prop.enum) {
+        const widget = node.addWidget('combo', name, prop.default || prop.enum[0], name, { values: prop.enum });
+        if (tooltip) widget.tooltip = tooltip;
+    } else if (prop.type === 'boolean') {
+        const widget = node.addWidget('toggle', name, prop.default || false, name);
+        if (tooltip) widget.tooltip = tooltip;
+    } else if (prop.type === 'integer') {
+        const widget = node.addWidget('number', name, prop.default || 0, name, { step: 1 });
+        if (tooltip) widget.tooltip = tooltip;
+    } else if (prop.type === 'number') {
+        const widget = node.addWidget('number', name, prop.default || 0, name, { step: 0.01 });
+        if (tooltip) widget.tooltip = tooltip;
+    } else if (prop.type === 'array' || prop.type === 'object') {
+        const widget = node.addWidget('text', name, prop.default ? JSON.stringify(prop.default) : '', name);
+        if (tooltip) widget.tooltip = tooltip;
+    } else {
+        // Check if this is a mapping/bloblang field (multiline Bloblang code)
+        if (name === 'mapping' || name === 'bloblang' || name === 'query' || name === 'sql') {
+            const widget = node.addWidget('text', name, prop.default || '', name);
+            widget.options = { multiline: true };
+            if (tooltip) widget.tooltip = tooltip;
+        } else {
+            const widget = node.addWidget('text', name, prop.default || '', name);
+            if (tooltip) widget.tooltip = tooltip;
+        }
+    }
+}
+
+function registerInputNodes() {
+    const inputSchema = bentoSchema?.properties?.input?.properties;
+    if (!inputSchema) {
+        console.log('No input schema found, using fallback nodes');
+        registerFallbackInputNodes();
+        return;
+    }
+    
+    console.log('Found', Object.keys(inputSchema).length, 'input types');
+    
+    for (const [inputName, inputDef] of Object.entries(inputSchema)) {
+        if (inputDef.type !== 'object') continue;
+        
+        const nodeType = `bento/input/${inputName}`;
+        const nodeTitle = inputName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const description = inputDef.description || '';
+        
+        class InputNode extends BentoInputNode {
+            constructor() {
+                super(inputName);
+                this.title = nodeTitle;
+                this.description = description;
+                
+                const props = extractProperties(inputDef);
+                for (const prop of props) {
+                    createWidgetForProperty(this, prop);
+                }
+            }
+        }
+        
+        InputNode.title = nodeTitle;
+        LiteGraph.registerNodeType(nodeType, InputNode);
+        nodeTypes.input[inputName] = { title: nodeTitle, type: nodeType };
+        nodeDescriptions.input[inputName] = description;
+    }
+}
+
+function registerFallbackInputNodes() {
+    class InputStdin extends BentoInputNode {
+        constructor() {
+            super('stdin');
+            this.title = 'Stdin';
+            this.addWidget('text', 'codec', 'lines', 'codec');
+        }
+    }
+    LiteGraph.registerNodeType('bento/input/stdin', InputStdin);
+    nodeTypes.input['stdin'] = { title: 'Stdin', type: 'bento/input/stdin' };
+    
+    class InputHTTPServer extends BentoInputNode {
+        constructor() {
+            super('http_server');
+            this.title = 'HTTP Server';
+            this.addWidget('text', 'address', '0.0.0.0:4195', 'address');
+            this.addWidget('text', 'path', '/post', 'path');
+        }
+    }
+    LiteGraph.registerNodeType('bento/input/http_server', InputHTTPServer);
+    nodeTypes.input['http_server'] = { title: 'HTTP Server', type: 'bento/input/http_server' };
+}
+
+function registerProcessorNodes() {
+    const processorsSchema = bentoSchema?.properties?.pipeline?.properties?.processors?.items?.properties;
+    
+    if (!processorsSchema) {
+        console.log('No processors schema found, using fallback nodes');
+        registerFallbackProcessorNodes();
+        return;
+    }
+    
+    console.log('Found', Object.keys(processorsSchema).length, 'processor types');
+    
+    for (const [procName, procDef] of Object.entries(processorsSchema)) {
+        if (procDef.type === 'object' && !procDef.properties) continue;
+        if (procDef.type !== 'object' && procDef.type !== 'string') continue;
+        
+        const nodeType = `bento/processor/${procName}`;
+        const nodeTitle = procName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const description = procDef.description || '';
+        
+        class ProcessorNode extends BentoProcessorNode {
+            constructor() {
+                super(procName);
+                this.title = nodeTitle;
+                this.description = description;
+                
+                if (procDef.type === 'string') {
+                    // String-type processors like 'mapping' and 'bloblang'
+                    // Use 'text' widget - when clicked, it opens a multiline dialog
+                    const w = this.addWidget('text', procName, '', procName);
+                    w.options = { multiline: true };
+                } else if (procDef.properties) {
+                    const props = extractProperties(procDef);
+                    for (const prop of props) {
+                        createWidgetForProperty(this, prop);
+                    }
+                }
+            }
+        }
+        
+        ProcessorNode.title = nodeTitle;
+        LiteGraph.registerNodeType(nodeType, ProcessorNode);
+        nodeTypes.processor[procName] = { title: nodeTitle, type: nodeType };
+        nodeDescriptions.processor[procName] = description;
+    }
+}
+
+function registerFallbackProcessorNodes() {
+    class ProcMapping extends BentoProcessorNode {
+        constructor() {
+            super('mapping');
+            this.title = 'Mapping';
+            const w = this.addWidget('text', 'mapping', 'root = this', 'mapping');
+            w.options = { multiline: true };
+        }
+    }
+    LiteGraph.registerNodeType('bento/processor/mapping', ProcMapping);
+    nodeTypes.processor['mapping'] = { title: 'Mapping', type: 'bento/processor/mapping' };
+    
+    class ProcSleep extends BentoProcessorNode {
+        constructor() {
+            super('sleep');
+            this.title = 'Sleep';
+            this.addWidget('text', 'duration', '1s', 'duration');
+        }
+    }
+    LiteGraph.registerNodeType('bento/processor/sleep', ProcSleep);
+    nodeTypes.processor['sleep'] = { title: 'Sleep', type: 'bento/processor/sleep' };
+}
+
+function registerOutputNodes() {
+    const outputSchema = bentoSchema?.properties?.output?.properties;
+    if (!outputSchema) {
+        console.log('No output schema found, using fallback nodes');
+        registerFallbackOutputNodes();
+        return;
+    }
+    
+    console.log('Found', Object.keys(outputSchema).length, 'output types');
+    
+    for (const [outputName, outputDef] of Object.entries(outputSchema)) {
+        if (outputDef.type !== 'object') continue;
+        
+        const nodeType = `bento/output/${outputName}`;
+        const nodeTitle = outputName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const description = outputDef.description || '';
+        
+        class OutputNode extends BentoOutputNode {
+            constructor() {
+                super(outputName);
+                this.title = nodeTitle;
+                this.description = description;
+                
+                const props = extractProperties(outputDef);
+                for (const prop of props) {
+                    createWidgetForProperty(this, prop);
+                }
+            }
+        }
+        
+OutputNode.title = nodeTitle;
+        LiteGraph.registerNodeType(nodeType, OutputNode);
+        nodeTypes.output[outputName] = { title: nodeTitle, type: nodeType };
+        nodeDescriptions.output[outputName] = description;
+    }
+}
+
+function registerFallbackOutputNodes() {
+    class OutputStdout extends BentoOutputNode {
+        constructor() {
+            super('stdout');
+            this.title = 'Stdout';
+            this.addWidget('text', 'codec', 'lines', 'codec');
+        }
+    }
+    LiteGraph.registerNodeType('bento/output/stdout', OutputStdout);
+    nodeTypes.output['stdout'] = { title: 'Stdout', type: 'bento/output/stdout' };
+    
+    class OutputHTTPClient extends BentoOutputNode {
+        constructor() {
+            super('http_client');
+            this.title = 'HTTP Client';
+            this.addWidget('text', 'url', 'http://localhost:8080/post', 'url');
+            this.addWidget('text', 'verb', 'POST', 'verb');
+            this.addWidget('text', 'timeout', '5s', 'timeout');
+        }
+    }
+    LiteGraph.registerNodeType('bento/output/http_client', OutputHTTPClient);
+    nodeTypes.output['http_client'] = { title: 'HTTP Client', type: 'bento/output/http_client' };
+}
+
+function registerNodes() {
+    if (!bentoSchema) {
+        console.log('No schema loaded, using fallback nodes');
+        registerFallbackInputNodes();
+        registerFallbackProcessorNodes();
+        registerFallbackOutputNodes();
+        return;
+    }
+    
+    registerInputNodes();
+    registerProcessorNodes();
+    registerOutputNodes();
+}
+
+function createNodePalette() {
+    const palette = document.getElementById('nodePalette');
+    const searchTerm = document.getElementById('nodeSearch').value.toLowerCase();
+    palette.innerHTML = '';
+    
+    const categories = [
+        { name: 'Inputs', nodes: nodeTypes.input, className: 'input', descriptions: nodeDescriptions.input },
+        { name: 'Processors', nodes: nodeTypes.processor, className: 'processor', descriptions: nodeDescriptions.processor },
+        { name: 'Outputs', nodes: nodeTypes.output, className: 'output', descriptions: nodeDescriptions.output }
+    ];
+    
+    for (const category of categories) {
+        const filteredNodes = Object.entries(category.nodes)
+            .filter(([name, def]) => 
+                name.toLowerCase().includes(searchTerm) || 
+                def.title.toLowerCase().includes(searchTerm)
+            );
+        
+        if (filteredNodes.length === 0) continue;
+        
+        const categoryEl = document.createElement('div');
+        categoryEl.className = 'node-category';
+        
+        const categoryName = document.createElement('div');
+        categoryName.className = 'node-category-name';
+        categoryName.textContent = category.name;
+        categoryEl.appendChild(categoryName);
+        
+        for (const [name, def] of filteredNodes) {
+            const nodeEl = document.createElement('div');
+            nodeEl.className = `node-item ${category.className}`;
+            nodeEl.textContent = def.title;
+            nodeEl.draggable = true;
+            nodeEl.dataset.nodeType = def.type;
+            
+            // Add description as tooltip
+            const desc = category.descriptions[name];
+            if (desc) {
+                nodeEl.dataset.tooltip = desc.substring(0, 500) + (desc.length > 500 ? '...' : '');
+            }
+            
+            nodeEl.addEventListener('dragstart', (e) => {
+                e.dataTransfer.setData('node-type', def.type);
+            });
+            
+            nodeEl.addEventListener('dblclick', () => {
+                const node = LiteGraph.createNode(def.type);
+                if (node) {
+                    node.pos = [100 + Math.random() * 200, 100 + Math.random() * 200];
+                    graph.add(node);
+                    console.log('Created node:', def.type);
+                }
+            });
+            
+            // Add hover tooltip
+            nodeEl.addEventListener('mouseenter', showTooltip);
+            nodeEl.addEventListener('mouseleave', hideTooltip);
+            
+            categoryEl.appendChild(nodeEl);
+        }
+        
+        palette.appendChild(categoryEl);
+    }
+    
+    if (palette.children.length === 0) {
+        palette.innerHTML = '<p class="empty-state">No matching nodes found</p>';
+    }
+}
+
+function initGraph() {
+    graph = new LGraph();
+    
+    const canvasEl = document.querySelector('#graph-canvas');
+    const container = document.querySelector('#canvas-container');
+    
+    if (!canvasEl) {
+        console.error('Canvas element not found');
+        return;
+    }
+    
+    if (container) {
+        canvasEl.width = container.clientWidth;
+        canvasEl.height = container.clientHeight;
+    }
+    
+    canvas = new LGraphCanvas(canvasEl, graph);
+    
+    canvas.background_image = null;
+    canvas.clear_background_color = '#0d1117';
+    canvas.default_connection_color = '#58a6ff';
+    canvas.default_link_color = '#58a6ff';
+    canvas.highquality_render = true;
+    canvas.render_shadows = false;
+    canvas.render_curved_connections = true;
+    canvas.render_title_on_connections = false;
+    
+    LiteGraph.NODE_DEFAULT_COLOR = '#21262d';
+    LiteGraph.NODE_DEFAULT_BGCOLOR = '#161b22';
+    LiteGraph.NODE_SELECTED_TITLE_COLOR = '#58a6ff';
+    LiteGraph.WIDGET_BGCOLOR = '#21262d';
+    LiteGraph.WIDGET_FGCOLOR = '#e6edf3';
+    LiteGraph.WIDGET_SECONDARY_FGCOLOR = '#8b949e';
+    LiteGraph.NODE_DEFAULT_SHAPE = 'round';
+    LiteGraph.NODE_TEXT_COLOR = '#e6edf3';
+    LiteGraph.NODE_SUBTEXT_SIZE = 12;
+    LiteGraph.NODE_TEXT_SIZE = 14;
+    LiteGraph.NODE_TITLE_HEIGHT = 20;
+    
+    canvas.resize();
+    
+    window.addEventListener('resize', () => {
+        canvas.resize();
+    });
+}
+
+function extractNodeConfig(node) {
+    const config = {};
+    
+    if (node.widgets) {
+        for (const widget of node.widgets) {
+            let value = widget.value;
+            if (typeof value === 'string') {
+                if (value.trim() === '') continue;
+                try {
+                    const parsed = JSON.parse(value);
+                    value = parsed;
+                } catch {
+                    // Keep as string
+                }
+            }
+            config[widget.name] = value;
+        }
+    }
+    
+    // For string-type processors (mapping, bloblang), return the value directly
+    // instead of wrapping it in an object
+    if (node.bentoType === 'processor' && node.widgets && node.widgets.length === 1) {
+        const widget = node.widgets[0];
+        if (widget.name === node.bentoName) {
+            let value = widget.value;
+            if (typeof value === 'string' && value.trim() !== '') {
+                return value;
+            }
+        }
+    }
+    
+    return config;
+}
+
+function compileGraph() {
+    const allNodes = graph._nodes || [];
+    const inputNodes = allNodes.filter(n => n.bentoType === 'input');
+    const outputNodes = allNodes.filter(n => n.bentoType === 'output');
+    
+    if (inputNodes.length === 0) {
+        showToast('No input node found! Add an input node to the graph.', 'error');
+        return null;
+    }
+    
+    const config = {
+        input: {},
+        pipeline: { processors: [] },
+        output: {}
+    };
+    
+    const inputNode = inputNodes[0];
+    config.input[inputNode.bentoName] = extractNodeConfig(inputNode);
+    
+    const visited = new Set();
+    let current = inputNode;
+    
+    while (current && !visited.has(current.id)) {
+        visited.add(current.id);
+        
+        if (current.outputs && current.outputs[0] && current.outputs[0].links) {
+            for (const linkId of current.outputs[0].links) {
+                const link = graph.links[linkId];
+                if (!link) continue;
+                
+                const nextNode = graph.getNodeById(link.target_id);
+                if (!nextNode) continue;
+                
+                if (nextNode.bentoType === 'processor') {
+                    const procConfig = {};
+                    procConfig[nextNode.bentoName] = extractNodeConfig(nextNode);
+                    config.pipeline.processors.push(procConfig);
+                    current = nextNode;
+                    break;
+                } else if (nextNode.bentoType === 'output') {
+                    config.output[nextNode.bentoName] = extractNodeConfig(nextNode);
+                    current = null;
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    
+    return config;
+}
+
+function toYAML(obj, indent = 0) {
+    const spaces = '  '.repeat(indent);
+    
+    if (obj === null || obj === undefined) {
+        return 'null';
+    }
+    
+    if (typeof obj === 'string') {
+        if (obj.includes('\n')) {
+            const lines = obj.split('\n');
+            return '|\n' + lines.map(l => spaces + '  ' + l).join('\n');
+        }
+        if (obj.includes(':') || obj.includes('#') || obj.includes("'") || obj.includes('"') || obj.includes('[') || obj.includes(']') || obj.includes('{') || obj.includes('}') || obj === '') {
+            const escaped = obj.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            return `"${escaped}"`;
+        }
+        return obj;
+    }
+    
+    if (typeof obj === 'number' || typeof obj === 'boolean') {
+        return String(obj);
+    }
+    
+    if (Array.isArray(obj)) {
+        if (obj.length === 0) return '[]';
+        return obj.map(item => {
+            const val = toYAML(item, indent + 1);
+            if (typeof item === 'object' && item !== null && !Array.isArray(item)) {
+                const lines = val.split('\n');
+                return '- ' + lines[0] + '\n' + lines.slice(1).map(l => spaces + '  ' + l).join('\n');
+            }
+            return '- ' + val;
+        }).join('\n');
+    }
+    
+    if (typeof obj === 'object') {
+        const entries = Object.entries(obj).filter(([k, v]) => {
+            // Skip empty objects and empty arrays
+            if (typeof v === 'object' && v !== null) {
+                if (Array.isArray(v) && v.length === 0) return false;
+                if (!Array.isArray(v) && Object.keys(v).length === 0) return false;
+            }
+            return true;
+        });
+        if (entries.length === 0) return '';
+        
+        return entries.map(([key, value]) => {
+            const val = toYAML(value, indent + 1);
+            
+            if (typeof value === 'object' && value !== null) {
+                if (Object.keys(value).length === 0 || (Array.isArray(value) && value.length === 0)) {
+                    return `${key}: ${val}`;
+                }
+                const lines = val.split('\n');
+                if (lines.length === 1) {
+                    return `${key}: ${val}`;
+                }
+                return `${key}:\n${lines.map(l => spaces + '  ' + l).join('\n')}`;
+            }
+            
+            return `${key}: ${val}`;
+        }).join('\n');
+    }
+    
+    return String(obj);
+}
+
+function previewConfig() {
+    const config = compileGraph();
+    if (!config) return;
+    
+    const preview = document.getElementById('config-preview');
+    const yaml = toYAML(config);
+    preview.innerHTML = `<code>${escapeHtml(yaml)}</code>`;
+    showToast('Configuration compiled', 'success');
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function copyConfig() {
+    const config = compileGraph();
+    if (!config) return;
+    
+    const yaml = toYAML(config);
+    navigator.clipboard.writeText(yaml)
+        .then(() => showToast('Configuration copied to clipboard', 'success'))
+        .catch(() => showToast('Failed to copy to clipboard', 'error'));
+}
+
+function getApiUrl() {
+    return window.location.origin;
+}
+
+async function deployStream() {
+    const config = compileGraph();
+    if (!config) return;
+    
+    const streamId = document.getElementById('streamId').value.trim();
+    
+    if (!streamId) {
+        showToast('Please enter a Stream ID', 'error');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${getApiUrl()}/streams/${streamId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        
+        if (response.ok) {
+            showToast(`Stream '${streamId}' deployed successfully!`, 'success');
+            refreshStreams();
+        } else {
+            const errorData = await response.json();
+            showApiError('Failed to deploy stream', errorData);
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    }
+}
+
+async function stopStream() {
+    const streamId = document.getElementById('streamId').value.trim();
+    
+    if (!streamId) {
+        showToast('Please enter a Stream ID', 'error');
+        return;
+    }
+    
+    try {
+        const response = await fetch(`${getApiUrl()}/streams/${streamId}`, { method: 'DELETE' });
+        
+        if (response.ok) {
+            showToast(`Stream '${streamId}' stopped`, 'success');
+            refreshStreams();
+        } else {
+            showToast(`Failed to stop stream '${streamId}'`, 'error');
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    }
+}
+
+async function refreshStreams() {
+    const streamsList = document.getElementById('streamsList');
+    
+    try {
+        const response = await fetch(`${getApiUrl()}/streams`);
+        
+        if (response.ok) {
+            const streams = await response.json();
+            renderStreamsList(streams);
+        } else {
+            streamsList.innerHTML = '<p class="empty-state">Unable to fetch streams</p>';
+        }
+    } catch (error) {
+        streamsList.innerHTML = '<p class="empty-state">API unavailable</p>';
+    }
+}
+
+function renderStreamsList(streams) {
+    const streamsList = document.getElementById('streamsList');
+    
+    if (!streams || Object.keys(streams).length === 0) {
+        streamsList.innerHTML = '<p class="empty-state">No active streams</p>';
+        return;
+    }
+    
+    streamsList.innerHTML = '';
+    
+    for (const [id, info] of Object.entries(streams)) {
+        const item = document.createElement('div');
+        item.className = 'stream-item';
+        item.innerHTML = `
+            <div>
+                <div class="stream-name">${escapeHtml(id)}</div>
+                <div class="stream-status ${info.active ? 'running' : 'stopped'}">
+                    ${info.active ? 'Running' : 'Stopped'}
+                </div>
+            </div>
+            <div class="stream-actions">
+                <button data-stream="${escapeHtml(id)}" data-action="select" title="Edit">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                    </svg>
+                </button>
+                <button data-stream="${escapeHtml(id)}" data-action="delete" title="Delete">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"></polyline>
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                </button>
+            </div>
+        `;
+        streamsList.appendChild(item);
+    }
+}
+
+function selectStream(streamId) {
+    document.getElementById('streamId').value = streamId;
+}
+
+async function deleteStreamById(streamId) {
+    try {
+        const response = await fetch(`${getApiUrl()}/streams/${streamId}`, { method: 'DELETE' });
+        
+        if (response.ok) {
+            showToast(`Stream '${streamId}' deleted`, 'success');
+            refreshStreams();
+        } else {
+            showToast(`Failed to delete stream '${streamId}'`, 'error');
+        }
+    } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
+    }
+}
+
+function saveGraph() {
+    const graphData = graph.serialize();
+    const streamId = document.getElementById('streamId').value || 'Untitled';
+    
+    const blob = new Blob([JSON.stringify(graphData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `bento-graph-${streamId}.json`;
+    a.click();
+    
+    URL.revokeObjectURL(url);
+    showToast('Graph saved', 'success');
+}
+
+function loadGraph() {
+    const input = document.getElementById('fileInput');
+    input.click();
+    
+    input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        try {
+            const text = await file.text();
+            const graphData = JSON.parse(text);
+            graph.configure(graphData);
+            showToast('Graph loaded', 'success');
+        } catch (error) {
+            showToast('Failed to load graph: ' + error.message, 'error');
+        }
+        
+        input.value = '';
+    };
+}
+
+function loadSavedGraph() {
+    const saved = localStorage.getItem('bento-graph');
+    if (saved) {
+        try {
+            const graphData = JSON.parse(saved);
+            graph.configure(graphData);
+        } catch (error) {
+            // Ignore errors on load
+        }
+    }
+}
+
+function clearGraph() {
+    graph.clear();
+    localStorage.removeItem('bento-graph');
+    showToast('Graph cleared', 'info');
+}
+
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toast-container');
+    
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    
+    container.appendChild(toast);
+    
+    setTimeout(() => {
+        toast.remove();
+    }, 4000);
+}
+
+function showApiError(title, error) {
+    const message = error.message || JSON.stringify(error, null, 2);
+    showToast(`${title}: ${message.substring(0, 100)}`, 'error');
+    console.error('API Error:', error);
+}
+
+function showModal(title, body, buttons) {
+    const modal = document.getElementById('modal');
+    document.getElementById('modal-title').textContent = title;
+    document.getElementById('modal-body').innerHTML = body;
+    
+    const footer = document.getElementById('modal-footer');
+    footer.innerHTML = '';
+    
+    for (const btn of buttons || []) {
+        const button = document.createElement('button');
+        button.className = `btn ${btn.class || 'btn-secondary'}`;
+        button.textContent = btn.text;
+        button.onclick = btn.onClick;
+        footer.appendChild(button);
+    }
+    
+    modal.classList.add('active');
+}
+
+function closeModal() {
+    document.getElementById('modal').classList.remove('active');
+}
+
+function setupEventListeners() {
+    document.getElementById('nodeSearch').addEventListener('input', createNodePalette);
+    
+    document.getElementById('btnPreview').addEventListener('click', previewConfig);
+    document.getElementById('btnDeploy').addEventListener('click', deployStream);
+    document.getElementById('btnStop').addEventListener('click', stopStream);
+    document.getElementById('btnRefresh').addEventListener('click', refreshStreams);
+    document.getElementById('btnSave').addEventListener('click', saveGraph);
+    document.getElementById('btnLoad').addEventListener('click', loadGraph);
+    document.getElementById('btnClear').addEventListener('click', clearGraph);
+    document.getElementById('btnCopy').addEventListener('click', copyConfig);
+    document.getElementById('btnCloseModal').addEventListener('click', closeModal);
+    
+    document.getElementById('streamsList').addEventListener('click', (e) => {
+        const btn = e.target.closest('button');
+        if (!btn) return;
+        
+        const streamId = btn.dataset.stream;
+        const action = btn.dataset.action;
+        
+        if (action === 'select') {
+            selectStream(streamId);
+        } else if (action === 'delete') {
+            deleteStreamById(streamId);
+        }
+    });
+    
+    document.getElementById('canvas-container').addEventListener('dragover', (e) => {
+        e.preventDefault();
+    });
+    
+    document.getElementById('canvas-container').addEventListener('drop', (e) => {
+        e.preventDefault();
+        const nodeType = e.dataTransfer.getData('node-type');
+        if (nodeType) {
+            const node = LiteGraph.createNode(nodeType);
+            if (node) {
+                node.pos = canvas.convertEventToCanvasOffset(e);
+                graph.add(node);
+            }
+        }
+    });
+    
+    graph.events.addEventListener('change', () => {
+        try {
+            localStorage.setItem('bento-graph', JSON.stringify(graph.serialize()));
+        } catch (e) {
+            // Ignore
+        }
+    });
+}
+
+let tooltipEl = null;
+
+function showTooltip(e) {
+    const text = e.target.dataset.tooltip;
+    if (!text) return;
+    
+    if (!tooltipEl) {
+        tooltipEl = document.createElement('div');
+        tooltipEl.className = 'tooltip';
+        document.body.appendChild(tooltipEl);
+    }
+    
+    tooltipEl.textContent = text;
+    tooltipEl.classList.add('visible');
+    
+    const rect = e.target.getBoundingClientRect();
+    const tooltipRect = tooltipEl.getBoundingClientRect();
+    
+    let left = rect.right + 10;
+    let top = rect.top;
+    
+    // Adjust if overflowing right edge
+    if (left + tooltipRect.width > window.innerWidth - 10) {
+        left = rect.left - tooltipRect.width - 10;
+    }
+    
+    // Adjust if overflowing bottom edge
+    if (top + tooltipRect.height > window.innerHeight - 10) {
+        top = window.innerHeight - tooltipRect.height - 10;
+    }
+    
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top = top + 'px';
+}
+
+function hideTooltip() {
+    if (tooltipEl) {
+        tooltipEl.classList.remove('visible');
+    }
+}
+
+async function loadSchema() {
+    try {
+        const response = await fetch('schema.json');
+        bentoSchema = await response.json();
+    } catch (error) {
+        console.warn('Failed to load schema, using fallback nodes:', error);
+        showToast('Could not load schema.json - using minimal nodes', 'warning');
+    }
+}
+
+async function init() {
+    try {
+        await loadSchema();
+        console.log('Schema loaded:', bentoSchema ? 'yes' : 'no');
+    } catch (err) {
+        console.error('Failed to load schema:', err);
+    }
+    
+    initGraph();
+    registerNodes();
+    console.log('Nodes registered:', nodeTypes);
+    createNodePalette();
+    loadSavedGraph();
+    refreshStreams();
+    setupEventListeners();
+    console.log('App initialized');
+}
+
+document.addEventListener('DOMContentLoaded', init);
+
+window.app = { previewConfig, copyConfig, deployStream, stopStream, refreshStreams, selectStream, deleteStreamById, saveGraph, loadGraph, clearGraph, showToast, showModal, closeModal, compileGraph };
