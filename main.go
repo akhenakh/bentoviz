@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
 // staticFiles embeds the web UI files
@@ -28,8 +31,13 @@ func main() {
 	flag.Parse()
 
 	http.HandleFunc("/", handleStatic)
-	http.HandleFunc("/streams", handleStreams)
-	http.HandleFunc("/streams/", handleStreams)
+
+	// Proxy Streams API to Bento
+	http.HandleFunc("/streams", handleProxy)
+	http.HandleFunc("/streams/", handleProxy)
+
+	// Native Bloblang Playground Execution
+	http.HandleFunc("/execute", handleExecute)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
 	server := &http.Server{Addr: addr}
@@ -50,35 +58,84 @@ func main() {
 	}()
 
 	log.Printf("BentoViz serving on http://0.0.0.0:%d", *port)
-	log.Printf("Proxying to Bento at %s", bentoURL)
+	log.Printf("Proxying streams to Bento at %s", bentoURL)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
 
-func handleStatic(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
+// ExecuteRequest represents the payload from the playground UI
+type ExecuteRequest struct {
+	Input   string `json:"input"`
+	Mapping string `json:"mapping"`
+}
+
+// ExecuteResponse is sent back to the playground UI
+type ExecuteResponse struct {
+	Result       interface{} `json:"result,omitempty"`
+	MappingError string      `json:"mapping_error,omitempty"`
+	ParseError   string      `json:"parse_error,omitempty"`
+}
+
+func handleExecute(w http.ResponseWriter, r *http.Request) {
+	// CORS handling for playground
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	path := r.URL.Path
-	if path == "/" {
-		path = "/index.html"
-	}
-
-	path = strings.TrimPrefix(path, "/")
-	content, err := staticFiles.ReadFile(path)
-	if err != nil {
-		http.Error(w, "Not found", http.StatusNotFound)
+	var req ExecuteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
-	w.Header().Set("Content-Type", getContentType(path))
-	w.Write(content)
+	resp := ExecuteResponse{}
+	w.Header().Set("Content-Type", "application/json")
+
+	// 1. Parse the Bloblang mapping
+	exe, err := bloblang.Parse(req.Mapping)
+	if err != nil {
+		resp.ParseError = err.Error()
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// 2. Parse the input JSON test data
+	var inputVal interface{}
+	if strings.TrimSpace(req.Input) != "" {
+		if err := json.Unmarshal([]byte(req.Input), &inputVal); err != nil {
+			resp.MappingError = "Invalid Test Input JSON: " + err.Error()
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+	} else {
+		inputVal = map[string]interface{}{}
+	}
+
+	// 3. Execute the Bloblang mapping against the input
+	res, err := exe.Query(inputVal)
+	if err != nil {
+		resp.MappingError = err.Error()
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// 4. Send successful result
+	resp.Result = res
+	json.NewEncoder(w).Encode(resp)
 }
 
-func handleStreams(w http.ResponseWriter, r *http.Request) {
+func handleProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "OPTIONS" {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -130,6 +187,28 @@ func handleStreams(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+func handleStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	path := r.URL.Path
+	if path == "/" {
+		path = "/index.html"
+	}
+
+	path = strings.TrimPrefix(path, "/")
+	content, err := staticFiles.ReadFile(path)
+	if err != nil {
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", getContentType(path))
+	w.Write(content)
 }
 
 func getContentType(path string) string {

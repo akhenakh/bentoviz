@@ -31,15 +31,12 @@ BentoViz provides a graphical interface for designing, configuring, and deployin
 ## Building
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourorg/bentoviz.git
-cd bentoviz
-
-# Build the binary
-go build -o bentoviz .
+go install github.com/akhenakh/bentoviz@latest
 ```
+Or download a binary.
 
 ## Running
+You need a running Bento: `bento streams`.
 
 ```bash
 # Start BentoViz (default: port 8080, proxies to localhost:4195)
@@ -52,7 +49,6 @@ go build -o bentoviz .
 ./bentoviz -h
 ```
 
-You need a running Bento: `bento streams`.
 
 ## Usage
 

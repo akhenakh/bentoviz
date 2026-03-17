@@ -863,6 +863,7 @@ function closeModal() {
     document.getElementById('modal').classList.remove('active');
 }
 
+
 function setupEventListeners() {
     document.getElementById('nodeSearch').addEventListener('input', createNodePalette);
     
@@ -889,6 +890,20 @@ function setupEventListeners() {
     document.getElementById('btnClear').addEventListener('click', clearGraph);
     document.getElementById('btnCopy').addEventListener('click', copyConfig);
     document.getElementById('btnCloseModal').addEventListener('click', closeModal);
+    
+    // --- Advanced Modal Event Listeners ---
+    document.getElementById('btnSaveMapping').addEventListener('click', () => {
+        if (advancedEditorCallback) {
+            advancedEditorCallback(aceMappingEditor.getValue());
+            if (graph) graph.setDirtyCanvas(true, true);
+        }
+        document.getElementById('advanced-editor-modal').classList.remove('active');
+    });
+    
+    document.getElementById('btnCloseAdvancedEditor').addEventListener('click', () => {
+        document.getElementById('advanced-editor-modal').classList.remove('active');
+    });
+    // ----------------------------------------
     
     document.getElementById('streamsList').addEventListener('click', (e) => {
         const btn = e.target.closest('button');
@@ -999,5 +1014,108 @@ async function init() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+/* --- Advanced Bloblang Playground Integration --- */
+
+// Hook LiteGraph's default text dialog behavior to display the playground instead
+(function patchLitegraphPrompt() {
+    const originalPrompt = LGraphCanvas.prototype.prompt;
+    LGraphCanvas.prototype.prompt = function(title, value, callback, event, multiline) {
+        if (multiline) {
+            openAdvancedEditorForCallback(title, value, callback);
+        } else {
+            originalPrompt.apply(this, arguments);
+        }
+    };
+})();
+
+function debounce(func, wait) {
+    let timeout;
+    return function(...args) {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => func.apply(this, args), wait);
+    };
+}
+
+let advancedEditorCallback = null;
+let aceMappingEditor = null;
+let aceInputEditor = null;
+
+function initAdvancedEditor() {
+    if (aceMappingEditor) return;
+    
+    // Test Input Editor
+    aceInputEditor = ace.edit("ace-input");
+    aceInputEditor.session.setMode("ace/mode/json");
+    aceInputEditor.setTheme("ace/theme/tomorrow_night_eighties");
+    aceInputEditor.setValue('{\n  "message": "hello world"\n}', -1);
+    
+    // Mapping Editor (Bloblang)
+    aceMappingEditor = ace.edit("ace-mapping");
+    aceMappingEditor.session.setMode("ace/mode/coffee"); // Provides close-enough highlighting
+    aceMappingEditor.setTheme("ace/theme/tomorrow_night_eighties");
+
+    const onChange = debounce(validateAdvancedMapping, 500);
+    aceInputEditor.on("change", onChange);
+    aceMappingEditor.on("change", onChange);
+}
+
+async function validateAdvancedMapping() {
+    const mapping = aceMappingEditor.getValue();
+    const input = aceInputEditor.getValue();
+    const outputEl = document.getElementById('ace-output');
+    
+    outputEl.className = 'output-container';
+    outputEl.textContent = 'Validating...';
+
+    // Soft-parse check the test JSON
+    try {
+        JSON.parse(input);
+    } catch(e) {
+        outputEl.className = 'output-container error';
+        outputEl.textContent = 'Test Input Error: Invalid JSON\n' + e.message;
+        return;
+    }
+
+    try {
+        const response = await fetch('/execute', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ input: input, mapping: mapping })
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const data = await response.json();
+        
+        if (data.parse_error) {
+            outputEl.className = 'output-container error';
+            outputEl.textContent = `Parse Error:\n${data.parse_error}`;
+        } else if (data.mapping_error) {
+            outputEl.className = 'output-container error';
+            outputEl.textContent = `Mapping Execution Error:\n${data.mapping_error}`;
+        } else {
+            outputEl.className = 'output-container success';
+            let resStr = typeof data.result === 'string' ? data.result : JSON.stringify(data.result, null, 2);
+            outputEl.textContent = resStr || 'Success (No Output Data Generated)';
+        }
+    } catch (err) {
+        outputEl.className = 'output-container error';
+        outputEl.textContent = `Validation Request Failed: ${err.message}\n(Ensure Bento runs with an /execute endpoint exposed)`;
+    }
+}
+
+function openAdvancedEditorForCallback(title, value, callback) {
+    document.getElementById('advanced-editor-modal').classList.add('active');
+    document.getElementById('advanced-editor-title').textContent = `Editing Field: ${title}`;
+    advancedEditorCallback = callback;
+    
+    initAdvancedEditor();
+    aceMappingEditor.setValue(value || '', -1);
+    document.getElementById('ace-output').textContent = '';
+    validateAdvancedMapping();
+}
 
 window.app = { previewConfig, copyConfig, deployStream, stopStream, refreshStreams, selectStream, deleteStreamById, saveGraph, loadGraph, clearGraph, showToast, showModal, closeModal, compileGraph, getGraph: () => graph, getCanvas: () => canvas };

@@ -6,14 +6,22 @@
     <title>Bento Stream Visual Editor</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@comfyorg/litegraph@0.17.2/dist/css/litegraph.css">
     <link rel="stylesheet" href="styles.css">
+
+    <!-- ACE Editor Scripts (Reusing Playground tooling) -->
+    <script src="https://cdn.jsdelivr.net/npm/ace-builds@1.15.0/src-min-noconflict/ace.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ace-builds@1.15.0/src-min-noconflict/mode-json.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ace-builds@1.15.0/src-min-noconflict/mode-coffee.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/ace-builds@1.15.0/src-min-noconflict/theme-tomorrow_night_eighties.js"></script>
 </head>
 <body>
     <div id="app">
+        <!-- ... (existing sidebar and main editor code) ... -->
         <aside id="sidebar">
             <div class="sidebar-header">
                 <h1>BentoViz</h1>
                 <p class="subtitle">Stream Visual Editor</p>
             </div>
+            <!-- ... (Keep existing sidebar-sections inside) ... -->
             
             <div class="sidebar-section">
                 <div class="section-header">
@@ -124,7 +132,7 @@
                 </div>
             </div>
         </aside>
-        
+
         <main id="editor">
             <div id="canvas-container">
                 <canvas id="graph-canvas"></canvas>
@@ -132,6 +140,7 @@
         </main>
         
         <aside id="config-panel" class="collapsed">
+            <!-- ... (Keep existing config-panel intact) ... -->
             <div class="panel-header">
                 <h3>Configuration Preview</h3>
                 <div class="panel-header-actions">
@@ -157,6 +166,7 @@
     
     <div class="toast-container" id="toast-container"></div>
     
+    <!-- Standard Modal -->
     <div id="modal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -165,6 +175,33 @@
             </div>
             <div id="modal-body" class="modal-body"></div>
             <div id="modal-footer" class="modal-footer"></div>
+        </div>
+    </div>
+
+    <!-- Advanced Playground Modal -->
+    <div id="advanced-editor-modal" class="modal">
+        <div class="modal-content large-modal">
+            <div class="modal-header">
+                <h3 id="advanced-editor-title">Edit Mapping</h3>
+                <div class="header-actions" style="display: flex; gap: 12px; align-items: center;">
+                    <button id="btnSaveMapping" class="btn btn-primary">Save & Close</button>
+                    <button id="btnCloseAdvancedEditor" class="btn-close">&times;</button>
+                </div>
+            </div>
+            <div class="advanced-editor-body">
+                <div class="editor-pane">
+                    <div class="pane-header">Test Input (JSON)</div>
+                    <div id="ace-input" class="ace-container"></div>
+                </div>
+                <div class="editor-pane">
+                    <div class="pane-header">Mapping (Bloblang)</div>
+                    <div id="ace-mapping" class="ace-container"></div>
+                </div>
+                <div class="editor-pane full-width">
+                    <div class="pane-header">Live Output / Errors</div>
+                    <div id="ace-output" class="output-container"></div>
+                </div>
+            </div>
         </div>
     </div>
     
