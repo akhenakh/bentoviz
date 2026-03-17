@@ -1,5 +1,7 @@
 # BentoViz
 
+Work in Progress, do not use unless for contributing.
+
 A visual node editor for Bento stream processing workflows, built with LiteGraph.js.
 
 ## Overview

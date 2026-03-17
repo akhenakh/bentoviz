@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // staticFiles embeds the web UI files
@@ -27,9 +32,26 @@ func main() {
 	http.HandleFunc("/streams/", handleStreams)
 
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
+	server := &http.Server{Addr: addr}
+
+	// Channel to listen for shutdown signals
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	// Goroutine to listen for shutdown signal
+	go func() {
+		<-stop
+		log.Println("Shutting down server...")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("Server shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("BentoViz serving on http://0.0.0.0:%d", *port)
 	log.Printf("Proxying to Bento at %s", bentoURL)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }

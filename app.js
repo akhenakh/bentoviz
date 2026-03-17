@@ -2,6 +2,36 @@ import * as LiteGraphModule from 'https://cdn.jsdelivr.net/npm/@comfyorg/litegra
 
 const { LiteGraph, LGraph, LGraphCanvas, LGraphNode } = LiteGraphModule;
 
+// This intercepts specific Litegraph rendering methods to prevent 
+// them from shrinking the background canvas on High-DPI screens.
+// it fixes the connections to disappear if displayed on the right part of the canvas
+(function applyLitegraphDPIFix() {
+    const { DragAndScale } = LiteGraphModule;
+
+    function patchMethod(prototype, methodName) {
+        if (!prototype || !prototype[methodName]) return;
+        const original = prototype[methodName];
+        prototype[methodName] = function(...args) {
+            const originalRatio = window.devicePixelRatio;
+            // Force devicePixelRatio to 1 to stop Litegraph from scaling the background down
+            Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true });
+            try {
+                return original.apply(this, args);
+            } finally {
+                // Instantly restore it so the rest of your app isn't affected
+                Object.defineProperty(window, 'devicePixelRatio', { value: originalRatio, configurable: true });
+            }
+        };
+    }
+
+    patchMethod(LGraphCanvas.prototype, 'drawFrontCanvas');
+    patchMethod(LGraphCanvas.prototype, 'drawBackCanvas');
+    patchMethod(LGraphCanvas.prototype, 'centerOnNode');
+    patchMethod(DragAndScale.prototype, 'fitToBounds');
+    patchMethod(DragAndScale.prototype, 'animateToBounds');
+})();
+
+
 let graph = null;
 let canvas = null;
 let bentoSchema = null;
@@ -388,11 +418,6 @@ function initGraph() {
         return;
     }
     
-    if (container) {
-        canvasEl.width = container.clientWidth;
-        canvasEl.height = container.clientHeight;
-    }
-    
     canvas = new LGraphCanvas(canvasEl, graph);
     
     canvas.background_image = null;
@@ -416,7 +441,13 @@ function initGraph() {
     LiteGraph.NODE_TEXT_SIZE = 14;
     LiteGraph.NODE_TITLE_HEIGHT = 20;
     
+    canvas.autoresize = true;
     canvas.resize();
+    
+    const resizeObserver = new ResizeObserver(() => {
+        canvas.resize();
+    });
+    resizeObserver.observe(container);
     
     window.addEventListener('resize', () => {
         canvas.resize();
@@ -835,7 +866,21 @@ function closeModal() {
 function setupEventListeners() {
     document.getElementById('nodeSearch').addEventListener('input', createNodePalette);
     
-    document.getElementById('btnPreview').addEventListener('click', previewConfig);
+    document.getElementById('btnPreview').addEventListener('click', () => {
+        previewConfig();
+        const panel = document.getElementById('config-panel');
+        panel.classList.remove('collapsed');
+    });
+    document.getElementById('btnShowConfig').addEventListener('click', () => {
+        const panel = document.getElementById('config-panel');
+        panel.classList.toggle('collapsed');
+        canvas.resize();
+    });
+    document.getElementById('btnHideConfig').addEventListener('click', () => {
+        const panel = document.getElementById('config-panel');
+        panel.classList.add('collapsed');
+        canvas.resize();
+    });
     document.getElementById('btnDeploy').addEventListener('click', deployStream);
     document.getElementById('btnStop').addEventListener('click', stopStream);
     document.getElementById('btnRefresh').addEventListener('click', refreshStreams);
@@ -955,4 +1000,4 @@ async function init() {
 
 document.addEventListener('DOMContentLoaded', init);
 
-window.app = { previewConfig, copyConfig, deployStream, stopStream, refreshStreams, selectStream, deleteStreamById, saveGraph, loadGraph, clearGraph, showToast, showModal, closeModal, compileGraph };
+window.app = { previewConfig, copyConfig, deployStream, stopStream, refreshStreams, selectStream, deleteStreamById, saveGraph, loadGraph, clearGraph, showToast, showModal, closeModal, compileGraph, getGraph: () => graph, getCanvas: () => canvas };
