@@ -1002,6 +1002,8 @@ async function init() {
     } catch (err) {
         console.error('Failed to load schema:', err);
     }
+
+    await loadBloblangSyntax();
     
     initGraph();
     registerNodes();
@@ -1017,7 +1019,109 @@ document.addEventListener('DOMContentLoaded', init);
 
 /* --- Advanced Bloblang Playground Integration --- */
 
-// Hook LiteGraph's default text dialog behavior to display the playground instead
+let BLOBLANG_SYNTAX = { keywords: [], functions: {}, methods: {} };
+
+async function loadBloblangSyntax() {
+    try {
+        const response = await fetch('/syntax');
+        if (response.ok) {
+            BLOBLANG_SYNTAX = await response.json();
+            console.log(`Loaded ${Object.keys(BLOBLANG_SYNTAX.functions).length} functions and ${Object.keys(BLOBLANG_SYNTAX.methods).length} methods dynamically.`);
+        }
+    } catch (error) {
+        console.warn('Failed to load dynamic bloblang syntax from server:', error);
+    }
+}
+
+function createDocumentationHTML(spec, isMethod) {
+    const signature = `${isMethod ? "." : ""}${spec.name}()`;
+    
+    // Process Benthos markdown descriptions into HTML
+    let desc = spec.description || "No description available.";
+    desc = desc.replace(/```([a-z]*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+    desc = desc.replace(/`([^`]+)`/g, '<code>$1</code>');
+    desc = desc.replace(/:::([a-zA-Z]+)\n([\s\S]*?):::/g, '<div style="margin: 8px 0; padding: 8px; border-left: 3px solid var(--accent-blue); background: var(--bg-primary);">$2</div>');
+
+    return `
+    <div class="ace-doc">
+      <div class="ace-doc-signature">${signature}</div>
+      <div class="ace-doc-description">${desc}</div>
+    </div>`;
+}
+
+const bloblangCompleter = {
+    getCompletions: function(editor, session, pos, prefix, callback) {
+        const line = session.getLine(pos.row);
+        const beforeCursor = line.substring(0, pos.column).trim();
+        const isMethod = /\.\w*$/.test(beforeCursor);
+        let completions = [];
+
+        if (isMethod) {
+            Object.values(BLOBLANG_SYNTAX.methods || {}).forEach(spec => {
+                completions.push({
+                    caption: spec.name,
+                    value: `${spec.name}()`,
+                    meta: "method",
+                    score: 1000,
+                    docHTML: createDocumentationHTML(spec, true)
+                });
+            });
+        } else {
+            Object.values(BLOBLANG_SYNTAX.functions || {}).forEach(spec => {
+                completions.push({
+                    caption: spec.name,
+                    value: `${spec.name}()`,
+                    meta: "function",
+                    score: 900,
+                    docHTML: createDocumentationHTML(spec, false)
+                });
+            });
+            (BLOBLANG_SYNTAX.keywords || []).forEach(kw => {
+                if (kw.name.startsWith(prefix.toLowerCase())) {
+                    completions.push({
+                        caption: kw.name,
+                        value: kw.name,
+                        meta: "keyword",
+                        score: 800,
+                        docHTML: createDocumentationHTML(kw, false)
+                    });
+                }
+            });
+        }
+        callback(null, completions);
+    }
+};
+
+let advancedEditorCallback = null;
+let aceMappingEditor = null;
+let aceInputEditor = null;
+
+function initAdvancedEditor() {
+    if (aceMappingEditor) return;
+    
+    ace.require("ace/ext/language_tools");
+    
+    aceInputEditor = ace.edit("ace-input");
+    aceInputEditor.session.setMode("ace/mode/json");
+    aceInputEditor.setTheme("ace/theme/tomorrow_night_eighties");
+    aceInputEditor.setValue('{\n  "message": "hello world"\n}', -1);
+    
+    aceMappingEditor = ace.edit("ace-mapping");
+    aceMappingEditor.session.setMode("ace/mode/coffee"); 
+    aceMappingEditor.setTheme("ace/theme/tomorrow_night_eighties");
+
+    aceMappingEditor.setOptions({
+        enableBasicAutocompletion: [bloblangCompleter],
+        enableLiveAutocompletion: true,
+        enableSnippets: false
+    });
+
+    const onChange = debounce(validateAdvancedMapping, 500);
+    aceInputEditor.on("change", onChange);
+    aceMappingEditor.on("change", onChange);
+}
+
+// Intercept prompt events for big text areas natively across LiteGraph
 (function patchLitegraphPrompt() {
     const originalPrompt = LGraphCanvas.prototype.prompt;
     LGraphCanvas.prototype.prompt = function(title, value, callback, event, multiline) {
@@ -1037,29 +1141,6 @@ function debounce(func, wait) {
     };
 }
 
-let advancedEditorCallback = null;
-let aceMappingEditor = null;
-let aceInputEditor = null;
-
-function initAdvancedEditor() {
-    if (aceMappingEditor) return;
-    
-    // Test Input Editor
-    aceInputEditor = ace.edit("ace-input");
-    aceInputEditor.session.setMode("ace/mode/json");
-    aceInputEditor.setTheme("ace/theme/tomorrow_night_eighties");
-    aceInputEditor.setValue('{\n  "message": "hello world"\n}', -1);
-    
-    // Mapping Editor (Bloblang)
-    aceMappingEditor = ace.edit("ace-mapping");
-    aceMappingEditor.session.setMode("ace/mode/coffee"); // Provides close-enough highlighting
-    aceMappingEditor.setTheme("ace/theme/tomorrow_night_eighties");
-
-    const onChange = debounce(validateAdvancedMapping, 500);
-    aceInputEditor.on("change", onChange);
-    aceMappingEditor.on("change", onChange);
-}
-
 async function validateAdvancedMapping() {
     const mapping = aceMappingEditor.getValue();
     const input = aceInputEditor.getValue();
@@ -1068,10 +1149,7 @@ async function validateAdvancedMapping() {
     outputEl.className = 'output-container';
     outputEl.textContent = 'Validating...';
 
-    // Soft-parse check the test JSON
-    try {
-        JSON.parse(input);
-    } catch(e) {
+    try { JSON.parse(input); } catch(e) {
         outputEl.className = 'output-container error';
         outputEl.textContent = 'Test Input Error: Invalid JSON\n' + e.message;
         return;
@@ -1084,10 +1162,7 @@ async function validateAdvancedMapping() {
             body: JSON.stringify({ input: input, mapping: mapping })
         });
 
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         const data = await response.json();
         
         if (data.parse_error) {
@@ -1103,7 +1178,7 @@ async function validateAdvancedMapping() {
         }
     } catch (err) {
         outputEl.className = 'output-container error';
-        outputEl.textContent = `Validation Request Failed: ${err.message}\n(Ensure Bento runs with an /execute endpoint exposed)`;
+        outputEl.textContent = `Validation Request Failed: ${err.message}`;
     }
 }
 

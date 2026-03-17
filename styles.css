@@ -692,6 +692,45 @@ body {
     height: 100%;
 }
 
+/* --- Bloblang Autocomplete Documentation Popups --- */
+.ace_tooltip {
+    background-color: transparent !important;
+    padding: 0 !important;
+    border: none !important;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4) !important;
+    border-radius: 8px !important;
+    overflow: visible !important;
+    max-width: 450px !important;
+}
+
+.ace-doc {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    padding: 14px;
+    border-radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+    word-wrap: break-word;
+}
+
+.ace-doc-signature {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    color: var(--accent-blue);
+    background: var(--bg-primary);
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    margin-bottom: 10px;
+    font-weight: 600;
+}
+
+.ace-doc-description { margin-bottom: 10px; color: var(--text-secondary); }
+.ace-doc-parameters strong, .ace-doc-examples strong { color: var(--text-primary); display: block; margin: 8px 0 4px 0;}
+.ace-doc-param code { background: var(--bg-tertiary); padding: 2px 4px; border-radius: 4px; color: var(--accent-purple); }
+.ace-doc-examples code { display: block; background: var(--bg-primary); padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); margin-top: 4px; font-family: monospace; }
+
 .output-container {
     flex: 1;
     padding: 14px;

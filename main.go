@@ -18,8 +18,6 @@ import (
 	"github.com/warpstreamlabs/bento/public/bloblang"
 )
 
-// staticFiles embeds the web UI files
-//
 //go:embed index.html styles.css app.js schema.json
 var staticFiles embed.FS
 
@@ -36,17 +34,16 @@ func main() {
 	http.HandleFunc("/streams", handleProxy)
 	http.HandleFunc("/streams/", handleProxy)
 
-	// Native Bloblang Playground Execution
+	// Native Bloblang Playground Endpoints
 	http.HandleFunc("/execute", handleExecute)
+	http.HandleFunc("/syntax", handleSyntax) // New endpoint for dynamic autocomplete
 
 	addr := fmt.Sprintf("0.0.0.0:%d", *port)
 	server := &http.Server{Addr: addr}
 
-	// Channel to listen for shutdown signals
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	// Goroutine to listen for shutdown signal
 	go func() {
 		<-stop
 		log.Println("Shutting down server...")
@@ -64,13 +61,70 @@ func main() {
 	}
 }
 
-// ExecuteRequest represents the payload from the playground UI
+// --- Syntax Generation for Auto-complete ---
+
+type SyntaxSpec struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type SyntaxPayload struct {
+	Keywords  []SyntaxSpec          `json:"keywords"`
+	Functions map[string]SyntaxSpec `json:"functions"`
+	Methods   map[string]SyntaxSpec `json:"methods"`
+}
+
+func handleSyntax(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	payload := SyntaxPayload{
+		Keywords: []SyntaxSpec{
+			{"root", "The root of the output document"},
+			{"this", "The current context value"},
+			{"if", "Conditional expression"},
+			{"else", "Alternative branch"},
+			{"match", "Pattern matching expression"},
+			{"let", "Variable assignment"},
+			{"meta", "Access or mutate message metadata"},
+			{"error", "Throw a custom error"},
+		},
+		Functions: make(map[string]SyntaxSpec),
+		Methods:   make(map[string]SyntaxSpec),
+	}
+
+	// Walk the global environment to capture all standard + custom plugin functions
+	env := bloblang.GlobalEnvironment()
+
+	env.WalkFunctions(func(name string, view *bloblang.FunctionView) {
+		payload.Functions[name] = SyntaxSpec{
+			Name:        name,
+			Description: view.Description(),
+		}
+	})
+
+	env.WalkMethods(func(name string, view *bloblang.MethodView) {
+		payload.Methods[name] = SyntaxSpec{
+			Name:        name,
+			Description: view.Description(),
+		}
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(payload)
+}
+
+// --- Execution Engine ---
+
 type ExecuteRequest struct {
 	Input   string `json:"input"`
 	Mapping string `json:"mapping"`
 }
 
-// ExecuteResponse is sent back to the playground UI
 type ExecuteResponse struct {
 	Result       interface{} `json:"result,omitempty"`
 	MappingError string      `json:"mapping_error,omitempty"`
@@ -78,7 +132,6 @@ type ExecuteResponse struct {
 }
 
 func handleExecute(w http.ResponseWriter, r *http.Request) {
-	// CORS handling for playground
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -88,21 +141,16 @@ func handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method != "POST" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var req ExecuteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		http.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 
 	resp := ExecuteResponse{}
 	w.Header().Set("Content-Type", "application/json")
 
-	// 1. Parse the Bloblang mapping
+	// Parse Mapping
 	exe, err := bloblang.Parse(req.Mapping)
 	if err != nil {
 		resp.ParseError = err.Error()
@@ -110,7 +158,7 @@ func handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Parse the input JSON test data
+	// Parse Input JSON
 	var inputVal interface{}
 	if strings.TrimSpace(req.Input) != "" {
 		if err := json.Unmarshal([]byte(req.Input), &inputVal); err != nil {
@@ -122,7 +170,7 @@ func handleExecute(w http.ResponseWriter, r *http.Request) {
 		inputVal = map[string]interface{}{}
 	}
 
-	// 3. Execute the Bloblang mapping against the input
+	// Execute
 	res, err := exe.Query(inputVal)
 	if err != nil {
 		resp.MappingError = err.Error()
@@ -130,10 +178,11 @@ func handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4. Send successful result
 	resp.Result = res
 	json.NewEncoder(w).Encode(resp)
 }
+
+// --- Standard Proxy & Static Assets ---
 
 func handleProxy(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "OPTIONS" {
@@ -145,28 +194,20 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bentoPath := r.URL.Path
-	method := r.Method
-
 	var reqBody io.Reader
-	if method == "POST" || method == "PUT" {
+	if r.Method == "POST" || r.Method == "PUT" {
 		reqBody = r.Body
 	}
 
-	req, err := http.NewRequest(method, bentoURL+bentoPath, reqBody)
-	if err != nil {
-		http.Error(w, "Failed to create request: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
+	req, _ := http.NewRequest(r.Method, bentoURL+bentoPath, reqBody)
 	for key, values := range r.Header {
-		if strings.EqualFold(key, "Origin") || strings.EqualFold(key, "Referer") {
-			continue
-		}
-		for _, value := range values {
-			req.Header.Add(key, value)
+		if !strings.EqualFold(key, "Origin") && !strings.EqualFold(key, "Referer") {
+			for _, v := range values {
+				req.Header.Add(key, v)
+			}
 		}
 	}
-	if method == "POST" || method == "PUT" {
+	if r.Method == "POST" || r.Method == "PUT" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
@@ -178,56 +219,43 @@ func handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
+	for k, v := range resp.Header {
+		for _, val := range v {
+			w.Header().Add(k, val)
 		}
 	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
 
 func handleStatic(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	path := r.URL.Path
 	if path == "/" {
 		path = "/index.html"
 	}
-
 	path = strings.TrimPrefix(path, "/")
 	content, err := staticFiles.ReadFile(path)
 	if err != nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
-
 	w.Header().Set("Content-Type", getContentType(path))
 	w.Write(content)
 }
 
 func getContentType(path string) string {
-	switch {
-	case strings.HasSuffix(path, ".html"):
+	if strings.HasSuffix(path, ".html") {
 		return "text/html; charset=utf-8"
-	case strings.HasSuffix(path, ".css"):
-		return "text/css; charset=utf-8"
-	case strings.HasSuffix(path, ".js"):
-		return "application/javascript; charset=utf-8"
-	case strings.HasSuffix(path, ".json"):
-		return "application/json"
-	case strings.HasSuffix(path, ".svg"):
-		return "image/svg+xml"
-	case strings.HasSuffix(path, ".png"):
-		return "image/png"
-	case strings.HasSuffix(path, ".jpg"), strings.HasSuffix(path, ".jpeg"):
-		return "image/jpeg"
-	default:
-		return "application/octet-stream"
 	}
+	if strings.HasSuffix(path, ".css") {
+		return "text/css; charset=utf-8"
+	}
+	if strings.HasSuffix(path, ".js") {
+		return "application/javascript; charset=utf-8"
+	}
+	return "application/json"
 }
