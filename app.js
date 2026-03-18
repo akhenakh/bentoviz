@@ -700,9 +700,12 @@ async function refreshStreams() {
             const streams = await response.json();
             renderStreamsList(streams);
         } else {
+            const errorData = await response.json();
+            showApiError('Failed to refresh streams', errorData);
             streamsList.innerHTML = '<p class="empty-state">Unable to fetch streams</p>';
         }
     } catch (error) {
+        showToast(`Error: ${error.message}`, 'error');
         streamsList.innerHTML = '<p class="empty-state">API unavailable</p>';
     }
 }
