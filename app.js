@@ -765,61 +765,6 @@ async function deleteStreamById(streamId) {
     }
 }
 
-function saveGraph() {
-    const graphData = graph.serialize();
-    const streamId = document.getElementById('streamId').value || 'Untitled';
-    
-    const blob = new Blob([JSON.stringify(graphData, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `bento-graph-${streamId}.json`;
-    a.click();
-    
-    URL.revokeObjectURL(url);
-    showToast('Graph saved', 'success');
-}
-
-function loadGraph() {
-    const input = document.getElementById('fileInput');
-    input.click();
-    
-    input.onchange = async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        
-        try {
-            const text = await file.text();
-            const graphData = JSON.parse(text);
-            graph.configure(graphData);
-            showToast('Graph loaded', 'success');
-        } catch (error) {
-            showToast('Failed to load graph: ' + error.message, 'error');
-        }
-        
-        input.value = '';
-    };
-}
-
-function loadSavedGraph() {
-    const saved = localStorage.getItem('bento-graph');
-    if (saved) {
-        try {
-            const graphData = JSON.parse(saved);
-            graph.configure(graphData);
-        } catch (error) {
-            // Ignore errors on load
-        }
-    }
-}
-
-function clearGraph() {
-    graph.clear();
-    localStorage.removeItem('bento-graph');
-    showToast('Graph cleared', 'info');
-}
-
 function showToast(message, type = 'info') {
     const container = document.getElementById('toast-container');
     
@@ -885,9 +830,6 @@ function setupEventListeners() {
     document.getElementById('btnDeploy').addEventListener('click', deployStream);
     document.getElementById('btnStop').addEventListener('click', stopStream);
     document.getElementById('btnRefresh').addEventListener('click', refreshStreams);
-    document.getElementById('btnSave').addEventListener('click', saveGraph);
-    document.getElementById('btnLoad').addEventListener('click', loadGraph);
-    document.getElementById('btnClear').addEventListener('click', clearGraph);
     document.getElementById('btnCopy').addEventListener('click', copyConfig);
     document.getElementById('btnCloseModal').addEventListener('click', closeModal);
     
@@ -932,14 +874,6 @@ function setupEventListeners() {
                 node.pos = canvas.convertEventToCanvasOffset(e);
                 graph.add(node);
             }
-        }
-    });
-    
-    graph.events.addEventListener('change', () => {
-        try {
-            localStorage.setItem('bento-graph', JSON.stringify(graph.serialize()));
-        } catch (e) {
-            // Ignore
         }
     });
 }
@@ -1005,11 +939,9 @@ async function init() {
 
     await loadBloblangSyntax();
     
-    initGraph();
-    registerNodes();
+    initGraph();registerNodes();
     console.log('Nodes registered:', nodeTypes);
     createNodePalette();
-    loadSavedGraph();
     refreshStreams();
     setupEventListeners();
     console.log('App initialized');
@@ -1193,4 +1125,4 @@ function openAdvancedEditorForCallback(title, value, callback) {
     validateAdvancedMapping();
 }
 
-window.app = { previewConfig, copyConfig, deployStream, stopStream, refreshStreams, selectStream, deleteStreamById, saveGraph, loadGraph, clearGraph, showToast, showModal, closeModal, compileGraph, getGraph: () => graph, getCanvas: () => canvas };
+window.app = { previewConfig, copyConfig, deployStream, stopStream, refreshStreams, selectStream, deleteStreamById, showToast, showModal, closeModal, compileGraph, getGraph: () => graph, getCanvas: () => canvas };
