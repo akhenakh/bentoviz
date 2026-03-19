@@ -186,11 +186,28 @@ function extractProperties(schemaObj) {
     
     const props = [];
     for (const [name, def] of Object.entries(schemaObj.properties)) {
+        // Parse default from description if not explicitly defined
+        let defaultValue = def.default;
+        if (defaultValue === undefined && def.description) {
+            const match = def.description.match(/Default:\s*(.+?)(?:\.|,|$)/i);
+            if (match) {
+                const val = match[1].trim();
+                if (def.type === 'integer' || def.type === 'number') {
+                    defaultValue = parseFloat(val);
+                } else if (def.type === 'boolean') {
+                    defaultValue = val.toLowerCase() === 'true';
+                } else if (def.type === 'array' || def.type === 'object') {
+                    try { defaultValue = JSON.parse(val); } catch {}
+                } else {
+                    defaultValue = val;
+                }
+            }
+        }
         props.push({
             name,
             type: def.type || 'string',
             description: def.description || '',
-            default: def.default,
+            default: defaultValue,
             examples: def.examples,
             enum: def.enum
         });
@@ -209,11 +226,15 @@ function createWidgetForProperty(node, prop) {
         const widget = node.addWidget('toggle', name, prop.default || false, name);
         if (tooltip) widget.tooltip = tooltip;
     } else if (prop.type === 'integer') {
-        const widget = node.addWidget('number', name, prop.default || 0, name, { step: 1 });
+        const widget = node.addWidget('number', name, prop.default !== undefined ? prop.default : '', name, { step: 1 });
         if (tooltip) widget.tooltip = tooltip;
+        widget.propType = 'integer';
+        widget.propDefault = prop.default;
     } else if (prop.type === 'number') {
-        const widget = node.addWidget('number', name, prop.default || 0, name, { step: 0.01 });
+        const widget = node.addWidget('number', name, prop.default !== undefined ? prop.default : '', name, { step: 0.01 });
         if (tooltip) widget.tooltip = tooltip;
+        widget.propType = 'number';
+        widget.propDefault = prop.default;
     } else if (prop.type === 'array' || prop.type === 'object') {
         const widget = node.addWidget('text', name, prop.default ? JSON.stringify(prop.default) : '', name);
         if (tooltip) widget.tooltip = tooltip;
@@ -598,6 +619,8 @@ function extractNodeConfig(node) {
                     // Keep as string
                 }
             }
+            // For integer/number types, skip empty values (use Bento defaults)
+            if ((widget.propType === 'integer' || widget.propType === 'number') && value === '') continue;
             if (widget.name === 'label') {
                 labelValue = value;
             } else {
@@ -904,7 +927,13 @@ async function deployStream() {
             showToast(`Stream '${streamId}' deployed successfully!`, 'success');
             refreshStreams();
         } else {
-            const errorData = await response.json();
+            const errorText = await response.text();
+            let errorData;
+            try {
+                errorData = JSON.parse(errorText);
+            } catch {
+                errorData = { message: errorText };
+            }
             showApiError('Failed to deploy stream', errorData);
         }
     } catch (error) {
@@ -944,7 +973,13 @@ async function refreshStreams() {
             const streams = await response.json();
             renderStreamsList(streams);
         } else {
-            const errorData = await response.json();
+            const errorText = await response.text();
+            let errorData;
+            try {
+                errorData = JSON.parse(errorText);
+            } catch {
+                errorData = { message: errorText };
+            }
             showApiError('Failed to refresh streams', errorData);
             streamsList.innerHTML = '<p class="empty-state">Unable to fetch streams</p>';
         }
