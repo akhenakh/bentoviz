@@ -67,9 +67,105 @@ class BentoProcessorNode extends LGraphNode {
         this.bentoName = nodeName;
         this.color = COLORS.processor;
         this.boxcolor = COLORS.processor;
+        this.addWidget('text', 'label', '', 'label');
     }
     
     onExecute() {}
+}
+
+class BranchNode extends BentoProcessorNode {
+    constructor() {
+        super('branch');
+        this.title = 'Branch';
+        this.bentoName = 'branch';
+        this.addOutput('processors', 'message');
+        this.processorsAnchor = true;
+        this.addWidget('text', 'request_map', '', 'request_map', { multiline: true });
+        this.addWidget('text', 'result_map', '', 'result_map', { multiline: true });
+    }
+}
+
+class RetryNode extends BentoProcessorNode {
+    constructor() {
+        super('retry');
+        this.title = 'Retry';
+        this.bentoName = 'retry';
+        this.addOutput('processors', 'message');
+        this.processorsAnchor = true;
+        this.addWidget('number', 'max_retries', 0, 'max_retries', { step: 1 });
+        this.addWidget('toggle', 'parallel', false, 'parallel');
+    }
+}
+
+class GroupByNode extends BentoProcessorNode {
+    constructor() {
+        super('group_by');
+        this.title = 'Group By';
+        this.bentoName = 'group_by';
+        this.switchNode = true;
+        this.cases = [];
+        const self = this;
+        this.addWidget('button', '+ Add Group', null, function() {
+            self.addGroup();
+        });
+    }
+    
+    addGroup(check = '') {
+        const groupIndex = this.cases.length;
+        this.cases.push({ check });
+        const outputName = `group_${groupIndex}`;
+        this.addOutput(outputName, 'message');
+        this.addWidget('text', `check_${groupIndex}`, check, `check_${groupIndex}`, { multiline: true });
+        this.size = this.computeSize();
+        this.setDirtyCanvas(true, true);
+    }
+    
+    onSerialize(o) {
+        o.cases = this.cases.map((c, i) => ({ check: this.getWidgetValue(`check_${i}`) || c.check }));
+    }
+    
+    onConfigure(o) {
+        if (o.cases && o.cases.length > 0) {
+            this.cases = [];
+            o.cases.forEach(c => this.addGroup(c.check));
+        }
+    }
+}
+
+class SwitchNode extends BentoProcessorNode {
+    constructor() {
+        super('switch');
+        this.title = 'Switch';
+        this.bentoName = 'switch';
+        this.switchNode = true;
+        this.cases = [];
+        console.log('SwitchNode constructor called');
+        const self = this;
+        this.addWidget('button', '+ Add Case', null, function() {
+            self.addCase();
+        });
+    }
+    
+    addCase(check = '') {
+        const caseIndex = this.cases.length;
+        this.cases.push({ check });
+        const outputName = `case_${caseIndex}`;
+        this.addOutput(outputName, 'message');
+        this.addWidget('text', `check_${caseIndex}`, check, `check_${caseIndex}`, { multiline: true });
+        this.size = this.computeSize();
+        this.setDirtyCanvas(true, true);
+    }
+    
+    onSerialize(o) {
+        o.cases = this.cases.map((c, i) => ({ check: this.getWidgetValue(`check_${i}`) || c.check }));
+    }
+    
+    onConfigure(o) {
+        if (o.cases && o.cases.length > 0) {
+            this.cases = [];
+            o.cases.forEach(c => this.addCase(c.check));
+        }
+    }
 }
 
 class BentoOutputNode extends LGraphNode {
@@ -204,8 +300,40 @@ function registerProcessorNodes() {
     }
     
     console.log('Found', Object.keys(processorsSchema).length, 'processor types');
+    console.log('Has switch?', 'switch' in processorsSchema);
+    console.log('Switch type:', processorsSchema?.switch?.type);
     
     for (const [procName, procDef] of Object.entries(processorsSchema)) {
+        // Handle special processors first, before type filtering
+        if (procName === 'branch') {
+            LiteGraph.registerNodeType('bento/processor/branch', BranchNode);
+            nodeTypes.processor['branch'] = { title: 'Branch', type: 'bento/processor/branch' };
+            nodeDescriptions.processor['branch'] = procDef.description || '';
+            continue;
+        }
+        
+        if (procName === 'retry') {
+            LiteGraph.registerNodeType('bento/processor/retry', RetryNode);
+            nodeTypes.processor['retry'] = { title: 'Retry', type: 'bento/processor/retry' };
+            nodeDescriptions.processor['retry'] = procDef.description || '';
+            continue;
+        }
+        
+        if (procName === 'group_by') {
+            LiteGraph.registerNodeType('bento/processor/group_by', GroupByNode);
+            nodeTypes.processor['group_by'] = { title: 'Group By', type: 'bento/processor/group_by' };
+            nodeDescriptions.processor['group_by'] = procDef.description || '';
+            continue;
+        }
+        
+        if (procName === 'switch') {
+            console.log('Registering custom SwitchNode for switch processor');
+            LiteGraph.registerNodeType('bento/processor/switch', SwitchNode);
+            nodeTypes.processor['switch'] = { title: 'Switch', type: 'bento/processor/switch' };
+            nodeDescriptions.processor['switch'] = procDef.description || '';
+            continue;
+        }
+        
         if (procDef.type === 'object' && !procDef.properties) continue;
         if (procDef.type !== 'object' && procDef.type !== 'string') continue;
         
@@ -456,6 +584,7 @@ function initGraph() {
 
 function extractNodeConfig(node) {
     const config = {};
+    let labelValue = '';
     
     if (node.widgets) {
         for (const widget of node.widgets) {
@@ -469,23 +598,128 @@ function extractNodeConfig(node) {
                     // Keep as string
                 }
             }
-            config[widget.name] = value;
+            if (widget.name === 'label') {
+                labelValue = value;
+            } else {
+                config[widget.name] = value;
+            }
         }
     }
     
-    // For string-type processors (mapping, bloblang), return the value directly
-    // instead of wrapping it in an object
-    if (node.bentoType === 'processor' && node.widgets && node.widgets.length === 1) {
-        const widget = node.widgets[0];
-        if (widget.name === node.bentoName) {
-            let value = widget.value;
+    // For string-type processors (mapping, bloblang), wrap in object to include label
+    if (node.bentoType === 'processor' && node.widgets && node.widgets.length <= 2) {
+        const nonLabelWidgets = node.widgets.filter(w => w.name !== 'label');
+        if (nonLabelWidgets.length === 1 && nonLabelWidgets[0].name === node.bentoName) {
+            let value = nonLabelWidgets[0].value;
             if (typeof value === 'string' && value.trim() !== '') {
+                if (labelValue) {
+                    return { label: labelValue, [node.bentoName]: value };
+                }
                 return value;
             }
         }
     }
     
+    // Add label if present
+    if (labelValue) {
+        config.label = labelValue;
+    }
+    
     return config;
+}
+
+function collectBranchProcessors(branchNode) {
+    const processors = [];
+    const processorsOutput = branchNode.outputs && branchNode.outputs.find(o => o.name === 'processors');
+    if (!processorsOutput) return processors;
+    
+    const outputSlotIndex = branchNode.outputs.indexOf(processorsOutput);
+    if (outputSlotIndex === -1) return processors;
+    
+    if (branchNode.outputs && branchNode.outputs[outputSlotIndex] && branchNode.outputs[outputSlotIndex].links && branchNode.outputs[outputSlotIndex].links.length > 0) {
+        const firstLinkId = branchNode.outputs[outputSlotIndex].links[0];
+        const link = graph.links[firstLinkId];
+        if (link) {
+            const targetNode = graph.getNodeById(link.target_id);
+            if (targetNode && targetNode.bentoType === 'processor') {
+                return followProcessorChain(targetNode);
+            }
+        }
+    }
+    
+    return processors;
+}
+
+function collectSwitchCases(switchNode) {
+    const cases = [];
+    if (!switchNode.outputs) return cases;
+    
+    for (let i = 0; i < switchNode.outputs.length; i++) {
+        const output = switchNode.outputs[i];
+        if (!output.name.startsWith('case_')) continue;
+        
+        const caseIndex = parseInt(output.name.split('_')[1]);
+        const checkWidget = switchNode.widgets && switchNode.widgets.find(w => w.name === `check_${caseIndex}`);
+        const check = checkWidget ? checkWidget.value : '';
+        
+        const caseData = { check };
+        
+        if (output.links && output.links.length > 0) {
+            const linkId = output.links[0];
+            const link = graph.links[linkId];
+            if (link) {
+                const targetNode = graph.getNodeById(link.target_id);
+                if (targetNode && targetNode.bentoType === 'processor') {
+                    caseData.processors = followProcessorChain(targetNode);
+                }
+            }
+        }
+        
+        cases.push(caseData);
+    }
+    
+    return cases;
+}
+
+function followProcessorChain(startNode) {
+    const processors = [];
+    const visited = new Set();
+    let current = startNode;
+    
+    while (current && !visited.has(current.id)) {
+        visited.add(current.id);
+        
+        const procConfig = {};
+        if (current.processorsAnchor) {
+            const config = extractNodeConfig(current);
+            const branchProcessors = collectBranchProcessors(current);
+            if (branchProcessors.length > 0) {
+                config.processors = branchProcessors;
+            }
+            procConfig[current.bentoName] = config;
+        } else if (current.switchNode) {
+            const cases = collectSwitchCases(current);
+            procConfig[current.bentoName] = cases.length > 0 ? cases : [];
+        } else {
+            procConfig[current.bentoName] = extractNodeConfig(current);
+        }
+        processors.push(procConfig);
+        
+        if (current.outputs && current.outputs[0] && current.outputs[0].links && current.outputs[0].links.length > 0) {
+            const linkId = current.outputs[0].links[0];
+            const link = graph.links[linkId];
+            if (link) {
+                const nextNode = graph.getNodeById(link.target_id);
+                if (nextNode && nextNode.bentoType === 'processor') {
+                    current = nextNode;
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    
+    return processors;
 }
 
 function compileGraph() {
@@ -522,9 +756,19 @@ function compileGraph() {
                 if (!nextNode) continue;
                 
                 if (nextNode.bentoType === 'processor') {
-                    const procConfig = {};
-                    procConfig[nextNode.bentoName] = extractNodeConfig(nextNode);
-                    config.pipeline.processors.push(procConfig);
+                    if (nextNode.processorsAnchor) {
+                        const branchConfig = extractNodeConfig(nextNode);
+                        const branchProcessors = collectBranchProcessors(nextNode);
+                        if (branchProcessors.length > 0) {
+                            branchConfig.processors = branchProcessors;
+                        }
+                        config.pipeline.processors.push({ [nextNode.bentoName]: branchConfig });
+                    } else if (nextNode.switchNode) {
+                        const cases = collectSwitchCases(nextNode);
+                        config.pipeline.processors.push({ [nextNode.bentoName]: cases });
+                    } else {
+                        config.pipeline.processors.push({ [nextNode.bentoName]: extractNodeConfig(nextNode) });
+                    }
                     current = nextNode;
                     break;
                 } else if (nextNode.bentoType === 'output') {
