@@ -103,7 +103,6 @@ class GroupByNode extends BentoProcessorNode {
         this.title = 'Group By';
         this.bentoName = 'group_by';
         this.switchNode = true;
-        this.cases = [];
         const self = this;
         this.addWidget('button', '+ Add Group', null, function() {
             self.addGroup();
@@ -111,23 +110,26 @@ class GroupByNode extends BentoProcessorNode {
     }
     
     addGroup(check = '') {
-        const groupIndex = this.cases.length;
-        this.cases.push({ check });
-        const outputName = `group_${groupIndex}`;
-        this.addOutput(outputName, 'message');
+        const groupIndex = this.outputs ? this.outputs.length : 0;
+        this.addOutput(`group_${groupIndex}`, 'message');
         this.addWidget('text', `check_${groupIndex}`, check, `check_${groupIndex}`, { multiline: true });
         this.size = this.computeSize();
         this.setDirtyCanvas(true, true);
     }
     
     onSerialize(o) {
-        o.cases = this.cases.map((c, i) => ({ check: this.getWidgetValue(`check_${i}`) || c.check }));
+        if (o.cases) {
+            o.cases.forEach((c, i) => {
+                c.check = this.getWidgetValue(`check_${i}`) || c.check;
+            });
+        }
     }
     
     onConfigure(o) {
         if (o.cases && o.cases.length > 0) {
-            this.cases = [];
-            o.cases.forEach(c => this.addGroup(c.check));
+            o.cases.forEach(c => {
+                if (c.check) this.addGroup(c.check);
+            });
         }
     }
 }
@@ -181,6 +183,40 @@ class BentoOutputNode extends LGraphNode {
     onExecute() {}
 }
 
+class SwitchOutputNode extends BentoOutputNode {
+    constructor() {
+        super('switch');
+        this.title = 'Switch';
+        this.switchNode = true;
+        this.cases = [];
+        const self = this;
+        this.addWidget('button', '+ Add Case', null, function() {
+            self.addCase();
+        });
+    }
+    
+    addCase(check = '') {
+        const caseIndex = this.cases.length;
+        this.cases.push({ check });
+        const outputName = `case_${caseIndex}`;
+        this.addOutput(outputName, 'message');
+        this.addWidget('text', `check_${caseIndex}`, check, `check_${caseIndex}`, { multiline: true });
+        this.size = this.computeSize();
+        this.setDirtyCanvas(true, true);
+    }
+    
+    onSerialize(o) {
+        o.cases = this.cases.map((c, i) => ({ check: this.getWidgetValue(`check_${i}`) || c.check }));
+    }
+    
+    onConfigure(o) {
+        if (o.cases && o.cases.length > 0) {
+            this.cases = [];
+            o.cases.forEach(c => this.addCase(c.check));
+        }
+    }
+}
+
 function extractProperties(schemaObj) {
     if (!schemaObj || !schemaObj.properties) return [];
     
@@ -225,6 +261,8 @@ function createWidgetForProperty(node, prop) {
     } else if (prop.type === 'boolean') {
         const widget = node.addWidget('toggle', name, prop.default || false, name);
         if (tooltip) widget.tooltip = tooltip;
+        widget.propType = 'boolean';
+        widget.propDefault = prop.default;
     } else if (prop.type === 'integer') {
         const widget = node.addWidget('number', name, prop.default !== undefined ? prop.default : '', name, { step: 1 });
         if (tooltip) widget.tooltip = tooltip;
@@ -244,9 +282,13 @@ function createWidgetForProperty(node, prop) {
             const widget = node.addWidget('text', name, prop.default || '', name);
             widget.options = { multiline: true };
             if (tooltip) widget.tooltip = tooltip;
+            widget.propType = 'string';
+            widget.propDefault = prop.default;
         } else {
             const widget = node.addWidget('text', name, prop.default || '', name);
             if (tooltip) widget.tooltip = tooltip;
+            widget.propType = 'string';
+            widget.propDefault = prop.default;
         }
     }
 }
@@ -273,6 +315,9 @@ function registerInputNodes() {
                 super(inputName);
                 this.title = nodeTitle;
                 this.description = description;
+                
+                // Add label widget for all inputs (Bento feature)
+                this.addWidget('text', 'label', '', 'label');
                 
                 const props = extractProperties(inputDef);
                 for (const prop of props) {
@@ -422,8 +467,33 @@ function registerOutputNodes() {
     
     console.log('Found', Object.keys(outputSchema).length, 'output types');
     
+    // Register switch output specially first
+    LiteGraph.registerNodeType('bento/output/switch', SwitchOutputNode);
+    nodeTypes.output['switch'] = { title: 'Switch', type: 'bento/output/switch' };
+    
+    // Register reject and drop outputs (string-type outputs)
+    const stringOutputs = ['reject', 'drop'];
+    for (const outputName of stringOutputs) {
+        if (outputSchema[outputName]) {
+            const nodeType = `bento/output/${outputName}`;
+            const nodeTitle = outputName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            
+            class StringOutputNode extends BentoOutputNode {
+                constructor() {
+                    super(outputName);
+                    this.title = nodeTitle;
+                    this.addWidget('text', outputName, '', outputName);
+                }
+            }
+            
+            LiteGraph.registerNodeType(nodeType, StringOutputNode);
+            nodeTypes.output[outputName] = { title: nodeTitle, type: nodeType };
+        }
+    }
+    
     for (const [outputName, outputDef] of Object.entries(outputSchema)) {
         if (outputDef.type !== 'object') continue;
+        if (outputName === 'switch') continue; // Already registered
         
         const nodeType = `bento/output/${outputName}`;
         const nodeTitle = outputName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -442,7 +512,7 @@ function registerOutputNodes() {
             }
         }
         
-OutputNode.title = nodeTitle;
+        OutputNode.title = nodeTitle;
         LiteGraph.registerNodeType(nodeType, OutputNode);
         nodeTypes.output[outputName] = { title: nodeTitle, type: nodeType };
         nodeDescriptions.output[outputName] = description;
@@ -471,6 +541,9 @@ function registerFallbackOutputNodes() {
     }
     LiteGraph.registerNodeType('bento/output/http_client', OutputHTTPClient);
     nodeTypes.output['http_client'] = { title: 'HTTP Client', type: 'bento/output/http_client' };
+    
+    LiteGraph.registerNodeType('bento/output/switch', SwitchOutputNode);
+    nodeTypes.output['switch'] = { title: 'Switch', type: 'bento/output/switch' };
 }
 
 function registerNodes() {
@@ -621,11 +694,14 @@ function extractNodeConfig(node) {
             }
             // For integer/number types, skip empty values (use Bento defaults)
             if ((widget.propType === 'integer' || widget.propType === 'number') && value === '') continue;
+            // Skip values that match the schema default (user didn't change them)
+            if (widget.propDefault !== undefined && widget.propDefault !== null && value === widget.propDefault) continue;
+            // Skip label widget - it's handled separately
             if (widget.name === 'label') {
                 labelValue = value;
-            } else {
-                config[widget.name] = value;
+                continue;
             }
+            config[widget.name] = value;
         }
     }
     
@@ -643,8 +719,9 @@ function extractNodeConfig(node) {
         }
     }
     
-    // Add label if present
-    if (labelValue) {
+    // For inputs, label is handled separately at the input level
+    // For processors/outputs, add label if present
+    if (labelValue && node.bentoType !== 'input') {
         config.label = labelValue;
     }
     
@@ -762,7 +839,14 @@ function compileGraph() {
     };
     
     const inputNode = inputNodes[0];
-    config.input[inputNode.bentoName] = extractNodeConfig(inputNode);
+    const inputConfig = extractNodeConfig(inputNode);
+    
+    // Preserve label if set
+    const labelWidget = inputNode.widgets && inputNode.widgets.find(w => w.name === 'label');
+    if (labelWidget && labelWidget.value && labelWidget.value.trim()) {
+        config.input.label = labelWidget.value.trim();
+    }
+    config.input[inputNode.bentoName] = inputConfig;
     
     const visited = new Set();
     let current = inputNode;
@@ -795,7 +879,7 @@ function compileGraph() {
                     current = nextNode;
                     break;
                 } else if (nextNode.bentoType === 'output') {
-                    config.output[nextNode.bentoName] = extractNodeConfig(nextNode);
+                    buildOutputConfig(nextNode, config.output);
                     current = null;
                     break;
                 }
@@ -806,6 +890,63 @@ function compileGraph() {
     }
     
     return config;
+}
+
+function buildOutputConfig(outputNode, outputConfig) {
+    // Preserve label if set
+    const labelWidget = outputNode.widgets && outputNode.widgets.find(w => w.name === 'label');
+    if (labelWidget && labelWidget.value && labelWidget.value.trim()) {
+        outputConfig.label = labelWidget.value.trim();
+    }
+    
+    // Handle switch output specially
+    if (outputNode.switchNode || outputNode.bentoName === 'switch') {
+        const cases = [];
+        if (outputNode.outputs) {
+            for (let i = 0; i < outputNode.outputs.length; i++) {
+                const output = outputNode.outputs[i];
+                if (!output.name.startsWith('case_')) continue;
+                
+                const caseIndex = parseInt(output.name.split('_')[1]);
+                const checkWidget = outputNode.widgets && outputNode.widgets.find(w => w.name === `check_${caseIndex}`);
+                const check = checkWidget ? checkWidget.value : '';
+                
+                const caseData = {};
+                if (check && check.trim()) {
+                    caseData.check = check;
+                }
+                
+                // Find connected output for this case
+                if (output.links && output.links.length > 0) {
+                    const linkId = output.links[0];
+                    const link = graph.links[linkId];
+                    if (link) {
+                        const targetNode = graph.getNodeById(link.target_id);
+                        if (targetNode && targetNode.bentoType === 'output') {
+                            const caseOutputConfig = {};
+                            buildOutputConfig(targetNode, caseOutputConfig);
+                            caseData.output = caseOutputConfig;
+                        }
+                    }
+                }
+                
+                cases.push(caseData);
+            }
+        }
+        outputConfig.switch = { cases };
+    } else {
+        // Regular output
+        const nodeConfig = extractNodeConfig(outputNode);
+        // For string-type outputs like reject, drop - the config is the value directly
+        if (outputNode.widgets && outputNode.widgets.length === 1 && outputNode.widgets[0].name === outputNode.bentoName) {
+            const widget = outputNode.widgets[0];
+            if (typeof widget.value === 'string' && widget.value.trim()) {
+                outputConfig[outputNode.bentoName] = widget.value;
+                return;
+            }
+        }
+        outputConfig[outputNode.bentoName] = nodeConfig;
+    }
 }
 
 function toYAML(obj, indent = 0) {
@@ -1090,6 +1231,72 @@ function closeModal() {
     document.getElementById('modal').classList.remove('active');
 }
 
+let importEditor = null;
+
+function openImportModal() {
+    const bodyHtml = `
+        <div style="height: 300px; width: 100%; border: 1px solid #444;">
+            <div id="import-editor" style="height: 100%; width: 100%;"></div>
+        </div>
+        <p style="margin-top: 8px; font-size: 12px; color: #888;">Paste your Bento stream YAML configuration here.</p>
+    `;
+    
+    const buttons = [
+        {
+            text: 'Import',
+            class: 'btn-primary',
+            onClick: () => {
+                if (importEditor) {
+                    const yamlContent = importEditor.getValue();
+                    try {
+                        const data = jsyaml.load(yamlContent);
+                        if (!data) {
+                            showToast('Invalid YAML: Empty or null result', 'error');
+                            return;
+                        }
+                        // Handle both full API response format and direct config
+                        const config = data.config || data;
+                        parseConfigToGraph(config);
+                        closeModal();
+                        showToast('Configuration imported successfully', 'success');
+                    } catch (e) {
+                        showToast(`YAML Parse Error: ${e.message}`, 'error');
+                        console.error(e);
+                    }
+                }
+            }
+        },
+        {
+            text: 'Cancel',
+            class: 'btn-secondary',
+            onClick: closeModal
+        }
+    ];
+    
+    showModal('Import YAML Configuration', bodyHtml, buttons);
+    
+    // Initialize ACE editor after modal is shown
+    setTimeout(() => {
+        const editorDiv = document.getElementById('import-editor');
+        if (editorDiv) {
+            // Destroy previous editor instance if it exists
+            if (importEditor) {
+                importEditor.destroy();
+                importEditor = null;
+            }
+            importEditor = ace.edit("import-editor");
+            importEditor.setTheme("ace/theme/tomorrow_night_eighties");
+            importEditor.session.setMode("ace/mode/yaml");
+            importEditor.setOptions({
+                fontSize: "12pt",
+                showPrintMargin: false,
+                enableBasicAutocompletion: true,
+                enableLiveAutocompletion: true
+            });
+            importEditor.focus();
+        }
+    }, 100);
+}
 
 function setupEventListeners() {
     document.getElementById('nodeSearch').addEventListener('input', createNodePalette);
@@ -1104,6 +1311,7 @@ function setupEventListeners() {
         panel.classList.toggle('collapsed');
         canvas.resize();
     });
+    document.getElementById('btnImport').addEventListener('click', openImportModal);
     document.getElementById('btnHideConfig').addEventListener('click', () => {
         const panel = document.getElementById('config-panel');
         panel.classList.add('collapsed');
@@ -1137,7 +1345,7 @@ function setupEventListeners() {
         const action = btn.dataset.action;
         
         if (action === 'select') {
-            selectStream(streamId);
+            loadStreamIntoEditor(streamId);
         } else if (action === 'delete') {
             deleteStreamById(streamId);
         }
@@ -1407,4 +1615,464 @@ function openAdvancedEditorForCallback(title, value, callback) {
     validateAdvancedMapping();
 }
 
-window.app = { previewConfig, copyConfig, deployStream, stopStream, refreshStreams, selectStream, deleteStreamById, showToast, showModal, closeModal, compileGraph, getGraph: () => graph, getCanvas: () => canvas };
+async function fetchStreamConfig(streamId) {
+    try {
+        const response = await fetch(`${getApiUrl()}/streams/${streamId}`);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch stream: ${response.status}`);
+        }
+        const text = await response.text();
+        let data;
+        try {
+            data = JSON.parse(text);
+        } catch {
+            data = jsyaml.load(text);
+        }
+        // Bento streams API returns {active, uptime, config: {...}}
+        const config = data.config || data;
+        return config;
+    } catch (error) {
+        showToast(`Error fetching stream config: ${error.message}`, 'error');
+        return null;
+    }
+}
+
+function parseYAMLToConfig(yamlStr) {
+    try {
+        return jsyaml.load(yamlStr);
+    } catch (e) {
+        console.error('YAML parse error:', e);
+        return null;
+    }
+}
+
+function parseConfigToGraph(config) {
+    if (!config) {
+        showToast('No config to load', 'error');
+        return;
+    }
+    graph.clear();
+    const createdNodes = [];
+    let xPos = 100;
+    const yPos = 200;
+    const xSpacing = 280;
+    
+    function createNodeFromConfig(type, name, nodeConfig, x, y) {
+        const nodeType = `bento/${type}/${name}`;
+        const node = LiteGraph.createNode(nodeType);
+        if (!node) {
+            console.warn(`Unknown node type: ${nodeType}`);
+            return null;
+        }
+        node.pos = [x, y];
+        graph.add(node);
+        if (nodeConfig && node.widgets) {
+            populateNodeWidgets(node, nodeConfig);
+        }
+        return node;
+    }
+    
+function populateNodeWidgets(node, config) {
+        const widgetValues = {};
+        // Handle primitive values (string-type processors like mapping, bloblang)
+        if (typeof config === 'string' || typeof config === 'number' || typeof config === 'boolean') {
+            widgetValues[node.bentoName] = config;
+        } else if (node.bentoName && config && config[node.bentoName] !== undefined) {
+            const val = config[node.bentoName];
+            if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') {
+                widgetValues[node.bentoName] = val;
+            } else if (typeof val === 'object') {
+                Object.assign(widgetValues, val);
+            }
+        } else if (typeof config === 'object' && config !== null) {
+            Object.assign(widgetValues, config);
+        }
+        for (const widget of node.widgets) {
+            if (widget.name in widgetValues) {
+                const val = widgetValues[widget.name];
+                if (typeof val === 'object' && val !== null) {
+                    widget.value = JSON.stringify(val);
+                } else {
+                    widget.value = val;
+                }
+            }
+        }
+    }
+    
+    let lastX = xPos;
+    
+    function processProcessors(processors, startX, startY, inputNodeId, inputSlot =0) {
+        if (!processors || processors.length === 0) return { lastNode: inputNodeId ? graph.getNodeById(inputNodeId) : null, lastSlot: inputSlot, maxX: startX };
+        
+        let prevNode = inputNodeId !== null ? graph.getNodeById(inputNodeId) : null;
+        let prevSlot = inputSlot;
+        let currentX = startX;
+        let lastNode = null;
+        
+        for (const proc of processors) {
+            const procName = Object.keys(proc)[0];
+            const procConfig = proc[procName];
+            let node;
+            
+            if (procName === 'switch' || procName === 'group_by') {
+                node = createNodeFromConfig('processor', procName, {}, currentX, startY);
+                if (!node) continue;
+                
+                if (Array.isArray(procConfig)) {
+                    procConfig.forEach((caseConfig, idx) => {
+                        const checkValue = caseConfig.check || '';
+                        if (node.addCase) {
+                            node.addCase(checkValue);
+                        } else if (node.addGroup) {
+                            node.addGroup(checkValue);
+                        }
+                        const outputSlot = node.outputs.length - 1;
+                        if (caseConfig.processors && caseConfig.processors.length > 0) {
+                            const caseStartY = startY + idx * 250;
+                            processProcessors(caseConfig.processors, currentX + xSpacing, caseStartY, node.id, outputSlot);
+                        }
+                    });
+                }
+                if (prevNode) {
+                    prevNode.connect(prevSlot, node, 0);
+                }
+                lastNode = node;
+                currentX += xSpacing;
+            } else if (procName === 'branch' || procName === 'retry') {
+                node = createNodeFromConfig('processor', procName, procConfig, currentX, startY);
+                if (!node) continue;
+                
+                const innerProcessors = procConfig.processors || [];
+                if (innerProcessors.length > 0) {
+                    const procOutputSlot = node.outputs.findIndex(o => o.name === 'processors');
+                    if (procOutputSlot >= 0) {
+                        processProcessors(innerProcessors, currentX + xSpacing, startY + 180, node.id, procOutputSlot);
+                    }
+                }
+                if (prevNode) {
+                    prevNode.connect(prevSlot, node, 0);
+                }
+                lastNode = node;
+                currentX += xSpacing;
+            } else {
+                node = createNodeFromConfig('processor', procName, procConfig, currentX, startY);
+                if (!node) continue;
+                
+                if (prevNode) {
+                    prevNode.connect(prevSlot, node, 0);
+                }
+                prevNode = node;
+                prevSlot = 0;
+                lastNode = node;
+                currentX += xSpacing;
+            }
+        }
+        
+        return { lastNode, lastSlot: 0, maxX: currentX };
+    }
+    
+    // Parse input
+    if (config.input) {
+        let inputName = null;
+        let inputConfig = {};
+        let inputLabel = null;
+        
+        // Find the actual input type (exclude special fields like 'label')
+        for (const key of Object.keys(config.input)) {
+            if (key === 'label') {
+                inputLabel = config.input[key];
+            } else {
+                inputName = key;
+                inputConfig = config.input[key];
+            }
+        }
+        
+        if (inputName) {
+            const inputNode = createNodeFromConfig('input', inputName, inputConfig, xPos, yPos);
+            if (inputNode) {
+                // Set label if provided
+                if (inputLabel && inputNode.widgets) {
+                    const labelWidget = inputNode.widgets.find(w => w.name === 'label');
+                    if (labelWidget) labelWidget.value = inputLabel;
+                }
+                createdNodes.push(inputNode);
+                lastX = xPos + xSpacing;
+                
+                // Parse processors
+                const processors = config.pipeline?.processors || [];
+                let lastProcResult = { lastNode: inputNode, lastSlot: 0, maxX: lastX };
+                
+                if (processors.length > 0) {
+                    lastProcResult = processProcessors(processors, lastX, yPos, inputNode.id, 0);
+                    lastX = lastProcResult.maxX;
+                }
+                
+                // Parse output
+                if (config.output) {
+                    const prevNodeId = lastProcResult.lastNode ? lastProcResult.lastNode.id : null;
+                    const result = parseOutput(config.output, lastX, yPos, prevNodeId);
+                    createdNodes.push(...result.nodes);
+                }
+            }
+        }
+    }
+    
+    graph.setDirtyCanvas(true, true);
+    if (createdNodes.length > 0) {
+        canvas.centerOnNode(createdNodes[0]);
+    }
+    showToast('Stream loaded into editor', 'success');
+
+    function parseOutput(outputConfig, startX, startY, prevNodeId) {
+        const nodes = [];
+        
+        let outputName = null;
+        let outputData = {};
+        let outputLabel = null;
+        
+        for (const key of Object.keys(outputConfig)) {
+            if (key === 'label') {
+                outputLabel = outputConfig[key];
+            } else {
+                outputName = key;
+                outputData = outputConfig[key];
+            }
+        }
+        
+        if (!outputName) return { nodes: [], firstNode: null };
+        
+        if (outputName === 'switch') {
+            const switchNode = createNodeFromConfig('output', 'switch', {}, startX, startY);
+            if (!switchNode) return { nodes: [], firstNode: null };
+            
+            if (outputLabel && switchNode.widgets) {
+                const labelWidget = switchNode.widgets.find(w => w.name === 'label');
+                if (labelWidget) labelWidget.value = outputLabel;
+            }
+            
+            const cases = outputData.cases || [];
+            cases.forEach((caseConfig, idx) => {
+                if (switchNode.addCase) {
+                    switchNode.addCase(caseConfig.check || '');
+                }
+                if (caseConfig.output) {
+                    const caseResult = parseOutput(caseConfig.output, startX + 280, startY + idx * 250, null);
+                    nodes.push(...caseResult.nodes);
+                    const outputSlot = switchNode.outputs.length - 1;
+                    if (caseResult.firstNode) {
+                        switchNode.connect(outputSlot, caseResult.firstNode, 0);
+                    }
+                }
+            });
+            
+            nodes.unshift(switchNode);
+            if (prevNodeId !== null) {
+                const prev = graph.getNodeById(prevNodeId);
+                if (prev) prev.connect(0, switchNode, 0);
+            }
+        } else {
+            const outputNode = createNodeFromConfig('output', outputName, outputData, startX, startY);
+            if (outputNode) {
+                if (outputLabel && outputNode.widgets) {
+                    const labelWidget = outputNode.widgets.find(w => w.name === 'label');
+                    if (labelWidget) labelWidget.value = outputLabel;
+                }
+                nodes.push(outputNode);
+                if (prevNodeId !== null) {
+                    const prev = graph.getNodeById(prevNodeId);
+                    if (prev) prev.connect(0, outputNode, 0);
+                }
+            }
+        }
+        
+        return { nodes, firstNode: nodes[0] || null };
+    }
+}
+
+function getSchemaDefault(path) {
+    const parts = path.split('.');
+    if (parts.length < 2) return undefined;
+    
+    const entityType = parts[0]; // 'input', 'output', or 'pipeline'
+    const componentName = parts[1];
+    
+    let schemaSection = null;
+    if (entityType === 'input' && bentoSchema?.properties?.input?.properties) {
+        schemaSection = bentoSchema.properties.input.properties[componentName]?.properties;
+    } else if (entityType === 'output' && bentoSchema?.properties?.output?.properties) {
+        schemaSection = bentoSchema.properties.output.properties[componentName]?.properties;
+    }
+    
+    if (!schemaSection) return undefined;
+    
+    for (let i = 2; i < parts.length; i++) {
+        const part = parts[i];
+        if (schemaSection[part]) {
+            if (i === parts.length - 1) {
+                const prop = schemaSection[part];
+                if (prop.default !== undefined) return prop.default;
+                if (prop.description) {
+                    const match = prop.description.match(/Default:\s*(.+?)(?:\.|,|$)/i);
+                    if (match) {
+                        const val = match[1].trim();
+                        if (prop.type === 'integer' || prop.type === 'number') return parseFloat(val);
+                        if (prop.type === 'boolean') return val.toLowerCase() === 'true';
+                        return val;
+                    }
+                }
+                return undefined;
+            }
+            schemaSection = prop.properties;
+            if (!schemaSection) return undefined;
+        } else {
+            return undefined;
+        }
+    }
+    return undefined;
+}
+
+function deepCompare(obj1, obj2, path = '') {
+    const differences = [];
+    
+    if (typeof obj1 !== typeof obj2) {
+        differences.push({ path, type: 'type_mismatch', val1: obj1, val2: obj2 });
+        return differences;
+    }
+    
+    if (obj1 === null || obj2 === null) {
+        if (obj1 !== obj2) {
+            differences.push({ path, type: 'value_mismatch', val1: obj1, val2: obj2 });
+        }
+        return differences;
+    }
+    
+    if (typeof obj1 !== 'object') {
+        if (obj1 !== obj2) {
+            differences.push({ path, type: 'value_mismatch', val1: obj1, val2: obj2 });
+        }
+        return differences;
+    }
+    
+    if (Array.isArray(obj1) !== Array.isArray(obj2)) {
+        differences.push({ path, type: 'type_mismatch', val1: obj1, val2: obj2 });
+        return differences;
+    }
+    
+    if (Array.isArray(obj1)) {
+        if (obj1.length !== obj2.length) {
+            differences.push({ path, type: 'array_length', val1: obj1.length, val2: obj2.length });
+        } else {
+            for (let i = 0; i < obj1.length; i++) {
+                differences.push(...deepCompare(obj1[i], obj2[i], `${path}[${i}]`));
+            }
+        }
+        return differences;
+    }
+    
+    const keys1 = Object.keys(obj1);
+    const keys2 = Object.keys(obj2);
+    const allKeys = new Set([...keys1, ...keys2]);
+    
+    for (const key of allKeys) {
+        const newPath = path ? `${path}.${key}` : key;
+        if (!(key in obj1)) {
+            differences.push({ path: newPath, type: 'missing_in_original', val: obj2[key] });
+        } else if (!(key in obj2)) {
+            const val = obj1[key];
+            const schemaDefault = getSchemaDefault(newPath);
+            const isDefault = schemaDefault !== undefined && val === schemaDefault;
+            differences.push({ path: newPath, type: 'missing_in_reconstructed', val, isDefault });
+        } else {
+            differences.push(...deepCompare(obj1[key], obj2[key], newPath));
+        }
+    }
+    
+    return differences;
+}
+
+function formatDifferences(differences) {
+    if (differences.length === 0) return 'No differences';
+    
+    const defaultSkipped = [];
+    const otherDiffs = [];
+    
+    for (const d of differences) {
+        if (d.type === 'missing_in_reconstructed' && d.isDefault) {
+            defaultSkipped.push(d);
+        } else {
+            otherDiffs.push(d);
+        }
+    }
+    
+    const lines = [];
+    
+    if (defaultSkipped.length > 0) {
+        lines.push(`📋 ${defaultSkipped.length} values matching schema defaults (cleanly omitted):`);
+        lines.push(...defaultSkipped.slice(0, 10).map(d => 
+            `   ${d.path}: ${JSON.stringify(d.val)}`
+        ));
+        if (defaultSkipped.length > 10) {
+            lines.push(`   ... and ${defaultSkipped.length - 10} more`);
+        }
+    }
+    
+    if (otherDiffs.length > 0) {
+        if (defaultSkipped.length > 0) lines.push('');
+        lines.push(`⚠️  ${otherDiffs.length} actual differences (may need attention):`);
+        lines.push(...otherDiffs.slice(0, 10).map(d => {
+            const path = d.path || 'root';
+            switch (d.type) {
+                case 'value_mismatch':
+                    return `   ${path}: ${JSON.stringify(d.val1)} → ${JSON.stringify(d.val2)}`;
+                case 'type_mismatch':
+                    return `   ${path}: type changed (${typeof d.val1} → ${typeof d.val2})`;
+                case 'missing_in_original':
+                    return `   ${path}: added (${JSON.stringify(d.val)})`;
+                case 'missing_in_reconstructed':
+                    return `   ${path}: removed (was ${JSON.stringify(d.val)}) ⚠️`;
+                case 'array_length':
+                    return `   ${path}: array length ${d.val1} → ${d.val2}`;
+                default:
+                    return `   ${path}: ${d.type}`;
+            }
+        }));
+        if (otherDiffs.length > 10) {
+            lines.push(`   ... and ${otherDiffs.length - 10} more`);
+        }
+    }
+    
+    return lines.join('\n');
+}
+
+async function loadStreamIntoEditor(streamId) {
+    document.getElementById('streamId').value = streamId;
+    const originalConfig = await fetchStreamConfig(streamId);
+    if (!originalConfig) return;
+    
+    parseConfigToGraph(originalConfig);
+    
+    // Compare original with reconstructed config
+    const reconstructedConfig = compileGraph();
+    if (reconstructedConfig) {
+        const differences = deepCompare(originalConfig, reconstructedConfig);
+        
+        if (differences.length > 0) {
+            console.warn('Config differences detected:', differences);
+            // Update config panel to show comparison
+            const preview = document.getElementById('config-preview');
+            const yaml = toYAML(reconstructedConfig);
+            const diffPreview = `<details open><summary>⚠️ ${differences.length} differences from original config</summary><pre style="font-size: 11px; max-height: 200px; overflow-y: auto; background: #1a1a2e; padding: 8px; margin: 4px 0;">${escapeHtml(formatDifferences(differences))}</pre></details><hr><pre><code>${escapeHtml(yaml)}</code></pre>`;
+            preview.innerHTML = diffPreview;
+            
+            const panel = document.getElementById('config-panel');
+            panel.classList.remove('collapsed');
+            canvas.resize();
+            
+            showToast(`Loaded with ${differences.length} config differences`, 'warning');
+        } else {
+            showToast('Stream loaded into editor', 'success');
+        }
+    }
+}
+
+window.app = { previewConfig, copyConfig, deployStream, stopStream, refreshStreams, selectStream, deleteStreamById, showToast, showModal, closeModal, compileGraph, getGraph: () => graph, getCanvas: () => canvas, loadStreamIntoEditor, parseConfigToGraph };

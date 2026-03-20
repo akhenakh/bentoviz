@@ -2,7 +2,7 @@ module github.com/akhenakh/bentoviz
 
 go 1.26.1
 
-require github.com/warpstreamlabs/bento v1.15.2
+require github.com/warpstreamlabs/bento v1.16.1
 
 require (
 	github.com/Jeffail/gabs/v2 v2.7.0 // indirect

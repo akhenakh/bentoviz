@@ -168,10 +168,10 @@ All processors have an optional `label` field for uniquely identifying them in o
 
 ### Updating the Schema
 
-1. Download the latest Bento schema:
+1. Generate Bento schema:
    ```bash
-   # From Bento's docs or source
-   curl -o schema.json https://raw.githubusercontent.com/warpstreamlabs/bento/main/config/schema.json
+   # inside bento repository
+   go run ./cmd/tools/bento_docs_gen
    ```
 
 2. Rebuild the binary:
